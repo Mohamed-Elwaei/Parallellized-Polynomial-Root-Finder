@@ -1,0 +1,12 @@
+# Build directories
+build/
+cmake-build*/
+out/
+
+# Editor / OS cruft
+.vscode/
+.idea/
+*.o
+*.obj
+*.exe
+.DS_Store

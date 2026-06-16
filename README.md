@@ -1,0 +1,70 @@
+# polyroots — argument-principle subdivision root finder (Phase 1, CPU)
+
+A single-threaded C++17 reference implementation of a complex-analytic
+polynomial root finder. It locates all roots of a polynomial by recursively
+subdividing a bounding square and using the **argument principle** (winding
+numbers) to count the roots in each sub-region, then polishing the isolated
+roots with a multiplicity-aware **modified Newton** step.
+
+This is the correctness oracle and CPU baseline for a planned CUDA port. The
+control flow is deliberately written as a breadth-first work-list so it maps
+directly onto a GPU design: each `while`-loop iteration corresponds to one
+kernel launch over the whole active queue.
+
+## Layout
+
+```
+include/polyroots/   public headers (one per module)
+  constants.hpp        shared constants (pi, eps_machine)
+  polynomial.hpp       Polynomial: Horner eval, derivative, from_roots
+  root_bound.hpp       Cauchy / Fujiwara root-enclosing bounds
+  winding.hpp          Square, winding_count, count_roots
+  newton.hpp           modified Newton polishing
+  solver.hpp           find_roots (the top-level subdivision driver)
+src/                 implementations, one .cpp per header
+apps/demo.cpp        human-facing smoke test over a battery of polynomials
+tests/               GoogleTest suites, one per module
+CMakeLists.txt       primary build (fetches GoogleTest automatically)
+Makefile             lightweight lib + demo build
+```
+
+## Build & run
+
+### CMake (recommended — fetches GoogleTest for you)
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./build/demo                  # run the demo
+ctest --test-dir build        # run all unit tests
+```
+
+### Makefile (quick, dependency-free for the demo)
+
+```bash
+make run                      # build + run the demo
+make test                     # build + run tests (needs a system GoogleTest)
+```
+
+## Validation status
+
+| Case                         | Result                                            |
+|------------------------------|---------------------------------------------------|
+| Distinct real roots          | machine precision                                 |
+| Roots of unity (deg 5/12/30) | machine precision                                 |
+| Repeated roots (z-1)^3(z+2)^2| correct multiplicity at the accuracy ceiling      |
+| Clustered roots              | resolved to ~1e-13                                |
+| Wilkinson (deg 20)           | **fails** — catastrophic cancellation (Phase-2)   |
+
+The Wilkinson failure is expected and is the motivation for the planned Phase-2
+robustness work (certified disk criterion + scaled/compensated Horner). The
+`Solver.WilkinsonIsTheDocumentedHardCase` test pins the current behaviour so a
+future improvement shows up as a deliberate change.
+
+## Testing framework
+
+Tests use **GoogleTest** — the C++ analog of Python's `unittest`. CMake pulls
+it in via `FetchContent`, so no manual install is needed. The suites are split
+by module (`test_polynomial`, `test_root_bound`, `test_winding`,
+`test_newton`, `test_solver`) and registered with CTest individually via
+`gtest_discover_tests`, so you can filter and run them like any CTest project.
