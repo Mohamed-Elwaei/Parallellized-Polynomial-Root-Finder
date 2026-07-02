@@ -32,7 +32,9 @@ def _parse(out):
     return roots, t
 
 def run_binary(cmd, degree, desc):
-    stdin = "".join(f"{c.real!r} {c.imag!r}\n" for c in desc)
+    # float() + .17g so numpy scalars serialize as plain "1.0", not numpy-2.0's
+    # repr "np.float64(1.0)" (which the C++/CUDA parsers can't read).
+    stdin = "".join(f"{float(c.real):.17g} {float(c.imag):.17g}\n" for c in desc)
     try:
         r = subprocess.run(cmd + [str(degree)], input=stdin,
                            capture_output=True, text=True, timeout=120)

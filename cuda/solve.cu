@@ -151,7 +151,9 @@ template<class Policy>
 std::vector<Found> solve(const std::vector<cmplx>& C, const std::vector<cmplx>& D,
                          double R, double& secs) {
     const int nc = (int)C.size(), dn = (int)D.size();
-    const int sps = 48;
+    // samples per edge, scaled with degree so the winding doesn't undersample
+    // densely-packed roots (mirrors the CPU's ~4*degree adaptive count).
+    const int sps = std::max(48, 4 * (nc - 1));
     const double isoThresh = 0.5, minHalf = 1e-6;
     const int maxLevel = 60;
     const size_t maxF = 1u << 16;
