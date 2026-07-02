@@ -154,7 +154,12 @@ std::vector<Found> solve(const std::vector<cmplx>& C, const std::vector<cmplx>& 
     // samples per edge, scaled with degree so the winding doesn't undersample
     // densely-packed roots (mirrors the CPU's ~4*degree adaptive count).
     const int sps = std::max(48, 4 * (nc - 1));
-    const double isoThresh = 0.5, minHalf = 1e-6;
+    // Isolate a count==1 cell only once it is small enough that its CENTER is a
+    // reliable Newton seed. Too large (the old 0.5) and Newton escapes across
+    // the fractal basin boundary to a neighbouring root -- catastrophic for
+    // densely-packed roots (e.g. roots of unity), where the basins shrink ~1/n.
+    const double isoThresh = std::min(0.5, 1.0 / std::max(1, nc - 1));
+    const double minHalf = 1e-6;
     const int maxLevel = 60;
     const size_t maxF = 1u << 16;
 
@@ -258,10 +263,10 @@ static void report(const char* name, const std::vector<Found>& found,
     for (const auto& f : found) {
         if (!f.cluster) {                                   // polished point: show residual
             cmplx pr = poly_eval(C.data(), (int)C.size(), f.z);
-            std::printf("    z = %+ .10f %+ .10fi    |P(z)| = %.2e\n",
+            std::printf("    z = %+.10f %+.10fi    |P(z)| = %.2e\n",
                         f.z.real(), f.z.imag(), thrust::abs(pr));
         } else {                                            // certified box enclosure
-            std::printf("    cluster: %d root(s) near %+ .6f %+ .6fi  +/- %.1e  (low confidence)\n",
+            std::printf("    cluster: %d root(s) near %+.6f %+.6fi  +/- %.1e  (low confidence)\n",
                         f.mult, f.z.real(), f.z.imag(), f.err);
         }
     }
