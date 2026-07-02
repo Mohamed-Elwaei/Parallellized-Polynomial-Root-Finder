@@ -6,10 +6,10 @@ subdividing a bounding square and using the **argument principle** (winding
 numbers) to count the roots in each sub-region, then polishing the isolated
 roots with a multiplicity-aware **modified Newton** step.
 
-This is the correctness oracle and CPU baseline for a planned CUDA port. The
-control flow is deliberately written as a breadth-first work-list so it maps
-directly onto a GPU design: each `while`-loop iteration corresponds to one
-kernel launch over the whole active queue.
+This is the correctness oracle and CPU baseline for the CUDA port now underway
+in [`cuda/`](cuda/). The control flow is deliberately written as a breadth-first
+work-list so it maps directly onto a GPU design: each `while`-loop iteration
+corresponds to one kernel launch over the whole active queue.
 
 ## Layout
 
@@ -23,7 +23,9 @@ include/polyroots/   public headers (one per module)
   solver.hpp           find_roots (the top-level subdivision driver)
 src/                 implementations, one .cpp per header
 apps/demo.cpp        human-facing smoke test over a battery of polynomials
-tests/               GoogleTest suites, one per module
+tests/               GoogleTest suites, one per module (incl. test_solver_stress)
+cuda/                GPU port prototypes + shared header (see cuda/README.md)
+docs/                operating-envelope / limitations report
 CMakeLists.txt       primary build (fetches GoogleTest automatically)
 Makefile             lightweight lib + demo build
 ```
@@ -60,6 +62,21 @@ The Wilkinson failure is expected and is the motivation for the planned Phase-2
 robustness work (certified disk criterion + scaled/compensated Horner). The
 `Solver.WilkinsonIsTheDocumentedHardCase` test pins the current behaviour so a
 future improvement shows up as a deliberate change.
+
+`tests/test_solver_stress.cpp` pushes the solver along each axis (degree, root
+magnitude, dynamic range, clustering, multiplicity) until it breaks; the
+measured operating envelope is written up in
+[`docs/`](docs/polyroots_limitations_report.pdf). The solver also carries a hard
+work-list cap so pathological inputs (e.g. very high multiplicity) terminate
+rather than hang.
+
+## CUDA port
+
+[`cuda/`](cuda/) contains the GPU implementation, developed against this CPU
+reference as the oracle. It progresses from a single winding kernel to a full
+pluggable solver (one BFS, three swappable winding strategies), with the shared
+leaf math written `__host__ __device__` so CPU and GPU stay in agreement. The
+prototypes run in a Kaggle GPU notebook — see [`cuda/README.md`](cuda/README.md).
 
 ## Testing framework
 

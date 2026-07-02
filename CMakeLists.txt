@@ -28,6 +28,10 @@ target_compile_options(polyroots PRIVATE -O2 -Wall -Wextra)
 add_executable(demo apps/demo.cpp)
 target_link_libraries(demo PRIVATE polyroots)
 
+# Benchmark CLI (shares the I/O contract with the CUDA `solve` tool).
+add_executable(solve_cli apps/solve_cli.cpp)
+target_link_libraries(solve_cli PRIVATE polyroots)
+
 # ---------------------------------------------------------------------------
 # Tests via GoogleTest, pulled in with FetchContent (no manual install).
 # Toggle with -DPOLYROOTS_BUILD_TESTS=OFF.
@@ -50,6 +54,7 @@ if(POLYROOTS_BUILD_TESTS)
         tests/test_winding.cpp
         tests/test_newton.cpp
         tests/test_solver.cpp
+        tests/test_solver_stress.cpp
     )
     target_include_directories(polyroots_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     target_link_libraries(polyroots_tests PRIVATE polyroots GTest::gtest_main)

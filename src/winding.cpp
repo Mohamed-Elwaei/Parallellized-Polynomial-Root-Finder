@@ -43,9 +43,11 @@ int winding_count(const Polynomial& P, const Square& sq,
         maxAbsP = std::max(maxAbsP, std::abs(p));
         scaleP  = std::max(scaleP, mp);
         double curArg = std::arg(p);
+        // Unwrap into (-pi, pi]. arg() returns values in a width-2pi interval, so
+        // d = curArg - prevArg is in [-2pi, 2pi] and a single correction suffices.
         double d = curArg - prevArg;
-        while (d <= -PI) d += TWO_PI;  // unwrap into (-pi, pi]
-        while (d >   PI) d -= TWO_PI;
+        if      (d <= -PI) d += TWO_PI;
+        else if (d >   PI) d -= TWO_PI;
         total  += d;
         prevArg = curArg;
     }

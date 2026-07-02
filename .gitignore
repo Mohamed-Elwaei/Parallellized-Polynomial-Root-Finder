@@ -10,3 +10,6 @@ out/
 *.obj
 *.exe
 .DS_Store
+
+# CTest run artifacts (regenerated under build/)
+Testing/
