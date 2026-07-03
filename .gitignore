@@ -13,3 +13,10 @@ out/
 
 # CTest run artifacts (regenerated under build/)
 Testing/
+
+# Claude Code local tooling (preview launch config, session state)
+.claude/
+
+# Python bytecode (from the GUI)
+__pycache__/
+*.pyc

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Polynomial Root Calculator</title>
+<!-- MathLive (vendored locally in gui/vendor -> works fully offline) -->
+<script src="/vendor/mathlive.min.js"></script>
+<script>
+  if (window.MathfieldElement) {
+    MathfieldElement.fontsDirectory  = "/vendor/fonts";   // local math fonts
+    MathfieldElement.soundsDirectory = null;              // no sound loads -> no network
+  }
+</script>
+<style>
+  :root { --accent:#0f4c81; --bg:#f6f8fb; --ink:#1a1a2e; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: var(--ink);
+         background: var(--bg); margin: 0; padding: 24px; }
+  h1 { font-size: 20px; color: var(--accent); margin: 0 0 16px; }
+  .bar { display: flex; gap: 10px; align-items: center; }
+  math-field { flex: 1; font-size: 26px; padding: 8px 12px; background: white;
+               border: 1.5px solid #cdd7e1; border-radius: 8px; }
+  math-field::part(menu-toggle) { display: none; }   /* remove the unused ≡ menu */
+  button { font-size: 16px; padding: 10px 20px; background: var(--accent); color: white;
+           border: none; border-radius: 8px; cursor: pointer; }
+  button:hover { background: #0c3e69; }
+  .cols { display: flex; gap: 20px; margin-top: 20px; align-items: flex-start; }
+  .panel { background: white; border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px; }
+  #results { width: 340px; min-height: 200px; font-family: Menlo, monospace; font-size: 13px;
+             white-space: pre-wrap; }
+  #plot { flex: 1; text-align: center; }
+  #plot img { max-width: 100%; border-radius: 8px; }
+  .err { color: #b00020; }
+  .muted { color: #778; }
+  .deg { color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+  <h1>Polynomial Root Calculator</h1>
+  <div class="bar">
+    <math-field id="mf">x^5+\left(9+12x+x^3\right)^4</math-field>
+    <select id="backend" title="which solver implementation">
+      <option value="cpu">CPU</option>
+      <option value="naive">GPU · naive</option>
+      <option value="gather">GPU · gather</option>
+      <option value="scatter">GPU · scatter</option>
+    </select>
+    <button onclick="run()">Solve</button>
+  </div>
+
+  <div class="cols">
+    <div class="panel" id="results"><span class="muted">Enter a polynomial and press Solve.</span></div>
+    <div class="panel" id="plot"></div>
+  </div>
+
+<script>
+async function run() {
+  const results = document.getElementById('results');
+  const plot = document.getElementById('plot');
+  const expr = document.getElementById('mf').value;   // LaTeX from MathLive
+  const backend = document.getElementById('backend').value;
+
+  results.innerHTML = '<span class="muted">Solving…</span>';
+  plot.innerHTML = '';
+  try {
+    const res = await fetch('/solve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expr, backend })
+    });
+    const d = await res.json();
+    if (d.error) { results.innerHTML = '<span class="err">Error: ' + d.error + '</span>'; return; }
+
+    let html = '<span class="deg">Degree ' + d.degree + '</span>\n' + d.poly + '\n\n';
+    html += 'Roots (' + d.roots.length + '):\n';
+    for (const [re, im, m] of d.roots) {
+      const mult = m > 1 ? '  (×' + m + ')' : '';
+      html += '  ' + re.toFixed(6) + (im >= 0 ? ' +' : ' ') + im.toFixed(6) + 'i' + mult + '\n';
+    }
+    results.textContent = ''; results.append(...toNodes(html));
+    plot.innerHTML = '<img src="data:image/png;base64,' + d.plot + '">';
+  } catch (e) {
+    results.innerHTML = '<span class="err">Request failed: ' + e + '</span>';
+  }
+}
+// keep the colored spans while using textContent for the root list
+function toNodes(html) {
+  const div = document.createElement('div'); div.innerHTML = html; return div.childNodes;
+}
+// Restrict the on-screen keyboard + menu to polynomial input, so functions like
+// sin/ln/√/∫ and "insert matrix" aren't offered (they aren't polynomials).
+try {
+  window.mathVirtualKeyboard.layouts = [{
+    label: 'poly',
+    rows: [
+      ['7', '8', '9', '(', ')', { latex: '^{#?}', label: 'xⁿ' }],
+      ['4', '5', '6', 'x', 'i', '+'],
+      ['1', '2', '3', '.', '\\times', '-'],
+      ['0', { latex: '\\pi', label: 'π' }, 'e',
+             { latex: '|#?|', label: '|a|' }, '[backspace]'],
+      [{ latex: '\\sin(#?)', label: 'sin' }, { latex: '\\cos(#?)', label: 'cos' },
+       { latex: '\\tan(#?)', label: 'tan' }, { latex: '\\ln(#?)', label: 'ln' },
+       { latex: '\\log(#?)', label: 'log' }, { latex: '\\sqrt{#?}', label: '√' }],
+      ['[left]', '[right]'],
+    ],
+  }];
+  document.getElementById('mf').menuItems = [];   // drop "insert matrix" etc.
+} catch (e) { console.warn('keyboard customization skipped:', e); }
+
+// solve on Enter inside the math field
+document.getElementById('mf').addEventListener('keydown', e => { if (e.key === 'Enter') run(); });
+window.addEventListener('load', run);
+</script>
+</body>
+</html>

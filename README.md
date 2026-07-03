@@ -25,6 +25,8 @@ src/                 implementations, one .cpp per header
 apps/demo.cpp        human-facing smoke test over a battery of polynomials
 tests/               GoogleTest suites, one per module (incl. test_solver_stress)
 cuda/                GPU port prototypes + shared header (see cuda/README.md)
+bench/               speed/accuracy benchmark: CPU vs GPU vs NumPy vs mpmath
+gui/                 web calculator: parse an expression -> solve -> plot roots
 docs/                operating-envelope / limitations report
 CMakeLists.txt       primary build (fetches GoogleTest automatically)
 Makefile             lightweight lib + demo build
@@ -77,6 +79,17 @@ reference as the oracle. It progresses from a single winding kernel to a full
 pluggable solver (one BFS, three swappable winding strategies), with the shared
 leaf math written `__host__ __device__` so CPU and GPU stay in agreement. The
 prototypes run in a Kaggle GPU notebook — see [`cuda/README.md`](cuda/README.md).
+
+## GUI
+
+[`gui/`](gui/) is a web calculator that ties the whole pipeline together: a
+Desmos-style **MathLive** math field (vendored locally, so it works offline)
+parses an expression to coefficients, feeds them to the solver, and shows the
+roots as text and on the complex plane (dashed root-bound contour, dots darker
+for higher multiplicity). It supports complex coefficients, functions of a
+constant argument (e.g. `sin(1+2i)`), the constants `pi`/`e`, and a CPU/GPU
+backend selector. Run it with `python3 gui/server.py` (needs Flask + matplotlib)
+and open the printed URL.
 
 ## Testing framework
 
