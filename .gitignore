@@ -20,3 +20,11 @@ Testing/
 # Python bytecode (from the GUI)
 __pycache__/
 *.pyc
+
+# LaTeX build artifacts (paper/ is compiled from paper.tex via tectonic/pdflatex)
+paper/*.pdf
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.synctex.gz
