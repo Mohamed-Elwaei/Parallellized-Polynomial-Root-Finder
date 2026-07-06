@@ -21,8 +21,8 @@ Testing/
 __pycache__/
 *.pyc
 
-# LaTeX build artifacts (paper/ is compiled from paper.tex via tectonic/pdflatex)
-paper/*.pdf
+# LaTeX build artifacts (paper/ is compiled from paper.tex via tectonic/pdflatex).
+# paper.pdf is intentionally committed so the README can link to a readable copy.
 paper/*.aux
 paper/*.log
 paper/*.out

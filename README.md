@@ -11,6 +11,34 @@ in [`cuda/`](cuda/). The control flow is deliberately written as a breadth-first
 work-list so it maps directly onto a GPU design: each `while`-loop iteration
 corresponds to one kernel launch over the whole active queue.
 
+> 📄 **Full write-up** — the method, the GPU parallelization, benchmarks, and
+> limitations are explained with figures in
+> [`paper/paper.pdf`](paper/paper.pdf) (source: [`paper/paper.tex`](paper/paper.tex)).
+
+## How it works
+
+The finder never solves for roots algebraically; it *counts* and then *locates*
+them by exploiting a fact from complex analysis:
+
+1. **Bound.** Cauchy/Fujiwara bounds give a square guaranteed to contain every
+   root of the polynomial.
+2. **Count by winding.** Cauchy's **argument principle** says that as `z` walks
+   once counter-clockwise around the boundary of a region, the image `P(z)`
+   winds around the origin exactly once per enclosed root. Sampling the boundary
+   and summing the change in `arg P` gives that integer count directly — no root
+   values needed.
+3. **Subdivide.** Split each square into four. A sub-square with count `0` is
+   discarded, `1` is a resolved isolation, `≥2` is subdivided again. The counts
+   always sum back to the polynomial's degree, which is the search's invariant.
+4. **Polish.** Once a root is isolated in a small cell, a multiplicity-aware
+   **modified Newton** step refines it to full precision.
+
+Because each sub-square's count depends only on *its own* boundary, the regions
+are embarrassingly parallel — which is what the [`cuda/`](cuda/) port exploits,
+with three winding strategies (per-cell, edge-gather, atomic-scatter). See the
+[paper](paper/paper.pdf) for the full derivation, diagrams, and the numerical
+edge cases where this breaks down.
+
 ## Layout
 
 ```
