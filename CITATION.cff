@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Parallelized Polynomial Root Finder"
+abstract: >-
+  A complex-analytic polynomial root finder that locates all roots by
+  recursively subdividing a bounding region and applying Cauchy's argument
+  principle (winding numbers) to count roots per cell, then polishing with a
+  multiplicity-aware modified Newton step. Includes a CUDA GPU port with three
+  parallel winding strategies (per-cell, edge-gather, atomic-scatter).
+type: software
+authors:
+  - given-names: Mohamed
+    family-names: Elwaei
+repository-code: "https://github.com/Mohamed-Elwaei/Parallellized-Polynomial-Root-Finder"
+url: "https://github.com/Mohamed-Elwaei/Parallellized-Polynomial-Root-Finder"
+license: MIT
+date-released: "2026-07-08"
+keywords:
+  - polynomial root finding
+  - argument principle
+  - winding number
+  - Newton's method
+  - CUDA
+  - GPU computing
