@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""
+Throughput benchmark: solve a BATCH of N polynomials and compare
+polynomials/second for the GPU batched solver vs a NumPy serial loop.
+
+This is the framing where the GPU is meant to win: NumPy processes the batch
+one polynomial at a time; the GPU floods every SM with all N at once.
+
+Usage:
+    python3 throughput.py -N 10000 -d 10 --gpu ./batched
+The GPU binary is skipped if not present (so the NumPy side runs anywhere).
+"""
+import argparse, subprocess, time, os
+import numpy as np
+
+def gen_batch(N, deg, seed=0):
+    """N random degree-`deg` polynomials (from random complex roots)."""
+    rng = np.random.default_rng(seed)
+    return [np.poly(rng.uniform(-1, 1, deg) + 1j * rng.uniform(-1, 1, deg)) for _ in range(N)]
+
+def run_numpy(polys):
+    t0 = time.perf_counter()
+    for c in polys:
+        np.roots(c)                    # one polynomial at a time (serial)
+    return time.perf_counter() - t0
+
+def run_gpu(binary, polys, deg):
+    N = len(polys)
+    lines = []
+    for c in polys:                    # descending coeffs, "re im" per line
+        for k in range(deg + 1):
+            lines.append(f"{float(c[k].real):.17g} {float(c[k].imag):.17g}")
+    stdin = "\n".join(lines) + "\n"
+    r = subprocess.run([binary, str(N), str(deg)], input=stdin,
+                       capture_output=True, text=True, timeout=600)
+    out = {}
+    for line in r.stdout.splitlines():
+        p = line.split()
+        if p and p[0] in ("SOLVE_MS", "THROUGHPUT", "MAXRESIDUAL"):
+            out[p[0]] = float(p[1])
+    return out, r.stderr
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gpu", default="./batched")
+    ap.add_argument("-N", type=int, default=10000)
+    ap.add_argument("-d", "--degree", type=int, default=10)
+    a = ap.parse_args()
+
+    print(f"batch: N={a.N} polynomials, degree={a.degree}")
+    polys = gen_batch(a.N, a.degree)
+
+    tnp = run_numpy(polys)
+    np_tput = a.N / tnp
+    print(f"  numpy (serial loop):  {tnp*1e3:9.1f} ms   {np_tput:12.0f} polys/sec")
+
+    if os.path.exists(a.gpu):
+        g, err = run_gpu(a.gpu, polys, a.degree)
+        if "THROUGHPUT" in g:
+            print(f"  gpu   (batched)    :  {g['SOLVE_MS']:9.1f} ms   {g['THROUGHPUT']:12.0f} polys/sec"
+                  f"   (max residual {g['MAXRESIDUAL']:.1e})")
+            print(f"  speedup (gpu / numpy): {g['THROUGHPUT']/np_tput:.1f}x")
+        else:
+            print("  gpu   : failed ->", err[:300])
+    else:
+        print(f"  gpu   : '{a.gpu}' not found (build + run on Kaggle)")
+
+if __name__ == "__main__":
+    main()
