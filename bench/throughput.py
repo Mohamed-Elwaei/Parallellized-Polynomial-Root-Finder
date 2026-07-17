@@ -24,14 +24,14 @@ def run_numpy(polys):
         np.roots(c)                    # one polynomial at a time (serial)
     return time.perf_counter() - t0
 
-def run_gpu(binary, polys, deg):
+def run_gpu(binary, polys, deg, extra=None):
     N = len(polys)
     lines = []
     for c in polys:                    # descending coeffs, "re im" per line
         for k in range(deg + 1):
             lines.append(f"{float(c[k].real):.17g} {float(c[k].imag):.17g}")
     stdin = "\n".join(lines) + "\n"
-    r = subprocess.run([binary, str(N), str(deg)], input=stdin,
+    r = subprocess.run([binary, str(N), str(deg)] + (extra or []), input=stdin,
                        capture_output=True, text=True, timeout=600)
     keys = ("SOLVE_MS", "THROUGHPUT", "MAXRESIDUAL",
             "SETUP_MS", "WINDING_MS", "TRIAGE_MS", "NEWTON_MS")
@@ -56,21 +56,19 @@ def main():
     np_tput = a.N / tnp
     print(f"  numpy (serial loop):  {tnp*1e3:9.1f} ms   {np_tput:12.0f} polys/sec")
 
-    if os.path.exists(a.gpu):
-        g, err = run_gpu(a.gpu, polys, a.degree)
-        if "THROUGHPUT" in g:
-            print(f"  gpu   (batched)    :  {g['SOLVE_MS']:9.1f} ms   {g['THROUGHPUT']:12.0f} polys/sec"
-                  f"   (max residual {g['MAXRESIDUAL']:.1e})")
-            print(f"  speedup (gpu / numpy): {g['THROUGHPUT']/np_tput:.1f}x")
-            if "TRIAGE_MS" in g:
-                tot = g["SOLVE_MS"]
-                print(f"  gpu breakdown: setup {g['SETUP_MS']:.1f} | winding {g['WINDING_MS']:.1f} | "
-                      f"triage(host) {g['TRIAGE_MS']:.1f} | newton {g['NEWTON_MS']:.1f}  (ms)")
-                print(f"                 host-triage is {100*g['TRIAGE_MS']/tot:.0f}% of the solve")
-        else:
-            print("  gpu   : failed ->", err[:300])
-    else:
+    if not os.path.exists(a.gpu):
         print(f"  gpu   : '{a.gpu}' not found (build + run on Kaggle)")
+        return
+    for flag in ("--double", "--float"):
+        g, err = run_gpu(a.gpu, polys, a.degree, [flag])
+        tag = flag.lstrip("-")
+        if "THROUGHPUT" not in g:
+            print(f"  gpu ({tag}): failed ->", err[:300]); continue
+        print(f"  gpu ({tag:<6})     :  {g['SOLVE_MS']:9.1f} ms   {g['THROUGHPUT']:12.0f} polys/sec"
+              f"   (max residual {g['MAXRESIDUAL']:.1e})  {g['THROUGHPUT']/np_tput:.1f}x vs numpy")
+        if "WINDING_MS" in g:
+            print(f"      breakdown: setup {g['SETUP_MS']:.1f} | winding {g['WINDING_MS']:.1f} | "
+                  f"triage {g['TRIAGE_MS']:.1f} | newton {g['NEWTON_MS']:.1f}  (ms)")
 
 if __name__ == "__main__":
     main()

@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <string>
 
 constexpr int K    = 8;          // KxK sub-grid per cell
 constexpr int NSUB = K * K;
@@ -64,17 +65,56 @@ __global__ void setup(const cmplx* coeffs, int N, int nc, cmplx* deriv,
     frontier[p] = { p, off * 0.4142, off * 0.3141, R * 1.05 + off };
 }
 
-// ---- winding: one block per (poly,cell) task, 64 threads over the sub-grid --
+// ---- winding templated on the compute precision T (float or double) ---------
+// Coefficients are stored in double; each is cast to T on read, so the ARITHMETIC
+// (Horner + arg/atan2) runs in T. On fp64-slow GPUs (e.g. T4) T=float is much
+// faster, and it's precise enough to COUNT roots (Newton still runs in double).
+template<class T>
+__device__ inline thrust::complex<T> heval_T(const cmplx* coeff, int nc, thrust::complex<T> z) {
+    thrust::complex<T> b(T(coeff[nc-1].real()), T(coeff[nc-1].imag()));
+    for (int k = nc - 2; k >= 0; --k)
+        b = b * z + thrust::complex<T>(T(coeff[k].real()), T(coeff[k].imag()));
+    return b;
+}
+template<class T>
+__device__ inline thrust::complex<T> perim_T(T cx, T cy, T half, int sps, int i) {
+    int s = i / sps; T t = T(i % sps) / sps, h = half, x, y;
+    if      (s == 0) { x = -h + 2*h*t; y = -h; }
+    else if (s == 1) { x =  h;         y = -h + 2*h*t; }
+    else if (s == 2) { x =  h - 2*h*t; y =  h; }
+    else             { x = -h;         y =  h - 2*h*t; }
+    return thrust::complex<T>(cx + x, cy + y);
+}
+template<class T>
+__device__ int wind_T(const cmplx* coeff, int nc, T cx, T cy, T half, int sps) {
+    const T PI = T(3.14159265358979323846);
+    int S = sps * 4;
+    T prev = thrust::arg(heval_T<T>(coeff, nc, perim_T<T>(cx, cy, half, sps, 0)));
+    T tot = 0;
+    for (int i = 1; i <= S; ++i) {
+        T cur = thrust::arg(heval_T<T>(coeff, nc, perim_T<T>(cx, cy, half, sps, i % S)));
+        T d = cur - prev;
+        while (d <= -PI) d += 2 * PI;
+        while (d >   PI) d -= 2 * PI;
+        tot += d; prev = cur;
+    }
+    double w = (double)tot / (2 * 3.14159265358979323846);
+    return (int)(w >= 0 ? w + 0.5 : w - 0.5);
+}
+
+// One block per (poly,cell) task, 64 threads over the sub-grid.
+template<class T>
 __global__ void batched_winding(const BatchCell* frontier, const cmplx* coeffs,
                                 int nc, int sps, int* counts) {
     int b = blockIdx.x;
     BatchCell tk = frontier[b];
     const cmplx* C = coeffs + (size_t)tk.poly * nc;           // <-- this poly's row
-    double h = tk.half / K;
+    T h = T(tk.half) / K;
     for (int t = threadIdx.x; t < NSUB; t += blockDim.x) {
         int i = t % K, j = t / K;
-        cmplx ctr(tk.cx - tk.half + (2*i+1)*h, tk.cy - tk.half + (2*j+1)*h);
-        counts[(size_t)b * NSUB + t] = winding_count(C, nc, ctr, h, sps);
+        T ctrx = T(tk.cx) - T(tk.half) + (2*i+1) * h;
+        T ctry = T(tk.cy) - T(tk.half) + (2*j+1) * h;
+        counts[(size_t)b * NSUB + t] = wind_T<T>(C, nc, ctrx, ctry, h, sps);
     }
 }
 
@@ -99,6 +139,12 @@ int main(int argc, char** argv) {
     if (argc < 3) { std::fprintf(stderr, "usage: batched_solve <N> <degree>\n"); return 1; }
     int N = std::atoi(argv[1]), deg = std::atoi(argv[2]), nc = deg + 1;
     if (N < 1 || deg < 1) { std::fprintf(stderr, "need N>=1, degree>=1\n"); return 1; }
+    bool useFloat = false;                                    // winding precision (--float|--double)
+    for (int a = 3; a < argc; ++a) {
+        std::string s = argv[a];
+        if      (s == "--float")  useFloat = true;
+        else if (s == "--double") useFloat = false;
+    }
 
     // read the batch: N polynomials, each nc "re im" pairs (descending), reversed
     // to ascending internally. (This I/O is NOT part of the timed solve.)
@@ -148,7 +194,8 @@ int main(int argc, char** argv) {
         if (n > maxTasks) { std::fprintf(stderr, "task cap hit\n"); break; }
         auto g0 = clk::now();
         CK(cudaMemcpy(d_front, frontier.data(), n * sizeof(BatchCell), cudaMemcpyHostToDevice));
-        batched_winding<<<(int)n, BLK>>>(d_front, d_coeffs, nc, sps, d_counts);
+        if (useFloat) batched_winding<float> <<<(int)n, BLK>>>(d_front, d_coeffs, nc, sps, d_counts);
+        else          batched_winding<double><<<(int)n, BLK>>>(d_front, d_coeffs, nc, sps, d_counts);
         CK(cudaGetLastError()); CK(cudaDeviceSynchronize());
         std::vector<int> counts(n * NSUB);
         CK(cudaMemcpy(counts.data(), d_counts, n * NSUB * sizeof(int), cudaMemcpyDeviceToHost));
@@ -206,6 +253,7 @@ int main(int argc, char** argv) {
         for (auto& r : roots[p]) { total++; maxres = fmax(maxres, thrust::abs(poly_eval(C, nc, r)) / scale); }
     }
 
+    std::printf("PRECISION %s\n", useFloat ? "float" : "double");
     std::printf("SOLVE_MS %.3f\n", secs * 1e3);
     std::printf("SETUP_MS %.3f\n", t_setup);            // phase breakdown of SOLVE_MS
     std::printf("WINDING_MS %.3f\n", t_wind);           //   GPU winding kernels + transfers
