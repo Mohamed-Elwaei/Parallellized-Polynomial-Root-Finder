@@ -70,6 +70,8 @@ def main():
             exp = a.N * a.degree
             flag = "" if g["ROOTS"] == exp else "   <-- INCOMPLETE (lost roots!)"
             print(f"      roots found: {int(g['ROOTS'])}/{exp} ({100*g['ROOTS']/exp:.1f}%){flag}")
+            if g["ROOTS"] < exp and err.strip():                  # surface the binary's stderr
+                print(f"      stderr: {err.strip()[:300]}")
         if "WINDING_MS" in g:
             print(f"      breakdown: setup {g['SETUP_MS']:.1f} | winding {g['WINDING_MS']:.1f} | "
                   f"triage {g['TRIAGE_MS']:.1f} | newton {g['NEWTON_MS']:.1f}  (ms)")

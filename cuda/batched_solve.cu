@@ -163,7 +163,6 @@ int main(int argc, char** argv) {
     // Frontier peaks around N*deg (each poly ~deg active cells); 4x is safe
     // headroom. d_counts = maxTasks*64 ints dominates memory, so this bounds N.
     const size_t maxTasks  = (size_t)4 * N * deg + 4096;
-    const size_t maxIso    = (size_t)N * deg + 1024;
 
     cmplx *d_coeffs, *d_deriv; double* d_bounds;
     BatchCell *d_front; int* d_counts;
@@ -221,7 +220,12 @@ int main(int argc, char** argv) {
     // --- batched Newton over all isolated cells ---
     auto nw0 = clk::now();
     std::vector<std::vector<cmplx>> roots(N);
-    if (!isolated.empty() && isolated.size() <= maxIso) {
+    if (isolated.size() > maxTasks) {                        // reuse d_front; guard its size
+        std::fprintf(stderr, "warning: %zu isolated > buffer %zu; truncating\n",
+                     isolated.size(), maxTasks);
+        isolated.resize(maxTasks);
+    }
+    if (!isolated.empty()) {
         int m = (int)isolated.size();
         cmplx* d_out; int *d_ok, *d_poly;
         CK(cudaMemcpy(d_front, isolated.data(), m * sizeof(BatchCell), cudaMemcpyHostToDevice));
