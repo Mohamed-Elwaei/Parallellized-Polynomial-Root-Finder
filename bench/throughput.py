@@ -33,10 +33,12 @@ def run_gpu(binary, polys, deg):
     stdin = "\n".join(lines) + "\n"
     r = subprocess.run([binary, str(N), str(deg)], input=stdin,
                        capture_output=True, text=True, timeout=600)
+    keys = ("SOLVE_MS", "THROUGHPUT", "MAXRESIDUAL",
+            "SETUP_MS", "WINDING_MS", "TRIAGE_MS", "NEWTON_MS")
     out = {}
     for line in r.stdout.splitlines():
         p = line.split()
-        if p and p[0] in ("SOLVE_MS", "THROUGHPUT", "MAXRESIDUAL"):
+        if p and p[0] in keys:
             out[p[0]] = float(p[1])
     return out, r.stderr
 
@@ -60,6 +62,11 @@ def main():
             print(f"  gpu   (batched)    :  {g['SOLVE_MS']:9.1f} ms   {g['THROUGHPUT']:12.0f} polys/sec"
                   f"   (max residual {g['MAXRESIDUAL']:.1e})")
             print(f"  speedup (gpu / numpy): {g['THROUGHPUT']/np_tput:.1f}x")
+            if "TRIAGE_MS" in g:
+                tot = g["SOLVE_MS"]
+                print(f"  gpu breakdown: setup {g['SETUP_MS']:.1f} | winding {g['WINDING_MS']:.1f} | "
+                      f"triage(host) {g['TRIAGE_MS']:.1f} | newton {g['NEWTON_MS']:.1f}  (ms)")
+                print(f"                 host-triage is {100*g['TRIAGE_MS']/tot:.0f}% of the solve")
         else:
             print("  gpu   : failed ->", err[:300])
     else:

@@ -128,25 +128,33 @@ int main(int argc, char** argv) {
     CK(cudaMalloc(&d_counts, maxTasks * NSUB * sizeof(int)));
     CK(cudaMemcpy(d_coeffs, h_coeffs.data(), (size_t)N * nc * sizeof(cmplx), cudaMemcpyHostToDevice));
 
-    auto t0 = std::chrono::steady_clock::now();
+    using clk = std::chrono::steady_clock;
+    auto ms_since = [](clk::time_point a){ return std::chrono::duration<double,std::milli>(clk::now()-a).count(); };
+    auto t0 = clk::now();
+    double t_setup = 0, t_wind = 0, t_triage = 0, t_newton = 0;   // per-phase breakdown
 
     // --- parallel setup: derivatives, bounds, initial frontier (N tasks) ---
+    auto s0 = clk::now();
     setup<<<nblocks(N, 256), 256>>>(d_coeffs, N, nc, d_deriv, d_bounds, d_front);
     CK(cudaGetLastError()); CK(cudaDeviceSynchronize());
     std::vector<BatchCell> frontier(N);
     CK(cudaMemcpy(frontier.data(), d_front, (size_t)N * sizeof(BatchCell), cudaMemcpyDeviceToHost));
+    t_setup = ms_since(s0);
 
     // --- batched BFS over the shared (poly,cell) work-list ---
     std::vector<BatchCell> isolated;
     for (int lv = 0; lv < maxLevel && !frontier.empty(); ++lv) {
         size_t n = frontier.size();
         if (n > maxTasks) { std::fprintf(stderr, "task cap hit\n"); break; }
+        auto g0 = clk::now();
         CK(cudaMemcpy(d_front, frontier.data(), n * sizeof(BatchCell), cudaMemcpyHostToDevice));
         batched_winding<<<(int)n, BLK>>>(d_front, d_coeffs, nc, sps, d_counts);
         CK(cudaGetLastError()); CK(cudaDeviceSynchronize());
         std::vector<int> counts(n * NSUB);
         CK(cudaMemcpy(counts.data(), d_counts, n * NSUB * sizeof(int), cudaMemcpyDeviceToHost));
+        t_wind += ms_since(g0);                        // GPU winding + transfers
 
+        auto h0 = clk::now();
         std::vector<BatchCell> next;
         for (size_t b = 0; b < n; ++b) {
             const BatchCell& tk = frontier[b]; double h = tk.half / K;
@@ -160,9 +168,11 @@ int main(int argc, char** argv) {
             }
         }
         frontier.swap(next);
+        t_triage += ms_since(h0);                      // host-side triage (the suspect)
     }
 
     // --- batched Newton over all isolated cells ---
+    auto nw0 = clk::now();
     std::vector<std::vector<cmplx>> roots(N);
     if (!isolated.empty() && isolated.size() <= maxIso) {
         int m = (int)isolated.size();
@@ -184,7 +194,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    t_newton = ms_since(nw0);
+    double secs = ms_since(t0) / 1e3;
 
     // --- truth-free correctness: worst |P(root)| / max|coeff| over the batch ---
     double maxres = 0.0; size_t total = 0;
@@ -196,6 +207,10 @@ int main(int argc, char** argv) {
     }
 
     std::printf("SOLVE_MS %.3f\n", secs * 1e3);
+    std::printf("SETUP_MS %.3f\n", t_setup);            // phase breakdown of SOLVE_MS
+    std::printf("WINDING_MS %.3f\n", t_wind);           //   GPU winding kernels + transfers
+    std::printf("TRIAGE_MS %.3f\n", t_triage);          //   host-side triage loop
+    std::printf("NEWTON_MS %.3f\n", t_newton);
     std::printf("THROUGHPUT %.1f\n", N / secs);          // polynomials per second
     std::printf("MAXRESIDUAL %.2e\n", maxres);
     std::printf("ROOTS %zu   (expected %d)\n", total, N * deg);
