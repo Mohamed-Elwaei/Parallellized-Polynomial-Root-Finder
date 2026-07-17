@@ -85,14 +85,40 @@ __device__ inline thrust::complex<T> perim_T(T cx, T cy, T half, int sps, int i)
     else             { x = -h;         y =  h - 2*h*t; }
     return thrust::complex<T>(cx + x, cy + y);
 }
-template<class T>
-__device__ int wind_T(const cmplx* coeff, int nc, T cx, T cy, T half, int sps) {
+// ---- argument methods (selectable via --arg) --------------------------------
+// (0) library atan2  : full-precision reference (thrust::arg).
+// (1) approx atan2   : cheap polynomial atan2, ~1e-3 rad; loop-telescoping
+//                      cancels the error so the winding is still exact.
+// (2) quadrant count : sign-based; no transcendental at all.
+template<class T> struct LibAtan2 {
+    __device__ T operator()(thrust::complex<T> w) const { return thrust::arg(w); }
+};
+template<class T> __device__ inline T approx_atan_unit(T r) {   // atan(r), |r|<=1
+    const T PI = T(3.14159265358979323846);
+    T ar = r < 0 ? -r : r;
+    return T(0.25) * PI * r - r * (ar - T(1)) * (T(0.2447) + T(0.0663) * ar);
+}
+template<class T> struct ApproxAtan2 {
+    __device__ T operator()(thrust::complex<T> w) const {
+        const T PI = T(3.14159265358979323846), HP = PI * T(0.5);
+        T x = w.real(), y = w.imag();
+        T ax = x < 0 ? -x : x, ay = y < 0 ? -y : y;
+        if (ax == 0 && ay == 0) return T(0);
+        if (ax >= ay) { T a = approx_atan_unit<T>(y / x); if (x < 0) a += (y >= 0 ? PI : -PI); return a; }
+        return (y >= 0 ? HP : -HP) - approx_atan_unit<T>(x / y);
+    }
+};
+
+// Winding via ANGLE accumulation — one impl serving atan2 AND approx (swap AngleFn).
+template<class T, class AngleFn>
+__device__ int wind_angle(const cmplx* coeff, int nc, T cx, T cy, T half, int sps) {
+    AngleFn ang;
     const T PI = T(3.14159265358979323846);
     int S = sps * 4;
-    T prev = thrust::arg(heval_T<T>(coeff, nc, perim_T<T>(cx, cy, half, sps, 0)));
+    T prev = ang(heval_T<T>(coeff, nc, perim_T<T>(cx, cy, half, sps, 0)));
     T tot = 0;
     for (int i = 1; i <= S; ++i) {
-        T cur = thrust::arg(heval_T<T>(coeff, nc, perim_T<T>(cx, cy, half, sps, i % S)));
+        T cur = ang(heval_T<T>(coeff, nc, perim_T<T>(cx, cy, half, sps, i % S)));
         T d = cur - prev;
         while (d <= -PI) d += 2 * PI;
         while (d >   PI) d -= 2 * PI;
@@ -101,9 +127,37 @@ __device__ int wind_T(const cmplx* coeff, int nc, T cx, T cy, T half, int sps) {
     double w = (double)tot / (2 * 3.14159265358979323846);
     return (int)(w >= 0 ? w + 0.5 : w - 0.5);
 }
+// Winding via QUADRANT counting — sign transitions, cross-product tiebreak on d==2.
+template<class T> __device__ inline int quadrant_of(thrust::complex<T> w) {
+    if (w.real() >= 0) return (w.imag() >= 0) ? 0 : 3;
+    return (w.imag() >= 0) ? 1 : 2;
+}
+template<class T>
+__device__ int wind_quadrant(const cmplx* coeff, int nc, T cx, T cy, T half, int sps) {
+    int S = sps * 4;
+    thrust::complex<T> wprev = heval_T<T>(coeff, nc, perim_T<T>(cx, cy, half, sps, 0));
+    int qprev = quadrant_of<T>(wprev), net = 0;
+    for (int i = 1; i <= S; ++i) {
+        thrust::complex<T> w = heval_T<T>(coeff, nc, perim_T<T>(cx, cy, half, sps, i % S));
+        int q = quadrant_of<T>(w), d = (q - qprev + 4) % 4;
+        if      (d == 1) net += 1;
+        else if (d == 3) net -= 1;
+        else if (d == 2) { T cr = wprev.real()*w.imag() - wprev.imag()*w.real(); net += (cr >= 0) ? 2 : -2; }
+        qprev = q; wprev = w;
+    }
+    double q = net / 4.0;
+    return (int)(q >= 0 ? q + 0.5 : q - 0.5);
+}
+// Compile-time method pick (0 atan2, 1 approx, 2 quadrant) — inlined, no runtime branch.
+template<class T, int METHOD>
+__device__ inline int winding_dispatch(const cmplx* C, int nc, T cx, T cy, T h, int sps) {
+    if      constexpr (METHOD == 2) return wind_quadrant<T>(C, nc, cx, cy, h, sps);
+    else if constexpr (METHOD == 1) return wind_angle<T, ApproxAtan2<T>>(C, nc, cx, cy, h, sps);
+    else                            return wind_angle<T, LibAtan2<T>>(C, nc, cx, cy, h, sps);
+}
 
 // One block per (poly,cell) task, 64 threads over the sub-grid.
-template<class T>
+template<class T, int METHOD>
 __global__ void batched_winding(const BatchCell* frontier, const cmplx* coeffs,
                                 int nc, int sps, int* counts) {
     int b = blockIdx.x;
@@ -114,7 +168,7 @@ __global__ void batched_winding(const BatchCell* frontier, const cmplx* coeffs,
         int i = t % K, j = t / K;
         T ctrx = T(tk.cx) - T(tk.half) + (2*i+1) * h;
         T ctry = T(tk.cy) - T(tk.half) + (2*j+1) * h;
-        counts[(size_t)b * NSUB + t] = wind_T<T>(C, nc, ctrx, ctry, h, sps);
+        counts[(size_t)b * NSUB + t] = winding_dispatch<T, METHOD>(C, nc, ctrx, ctry, h, sps);
     }
 }
 
@@ -136,14 +190,23 @@ __global__ void batched_newton(const BatchCell* iso, int m, const cmplx* coeffs,
 static int nblocks(int n, int b) { return (n + b - 1) / b; }
 
 int main(int argc, char** argv) {
-    if (argc < 3) { std::fprintf(stderr, "usage: batched_solve <N> <degree>\n"); return 1; }
+    if (argc < 3) { std::fprintf(stderr,
+        "usage: batched_solve <N> <degree> [--float|--double] [--arg atan2|approx|quadrant]\n"); return 1; }
     int N = std::atoi(argv[1]), deg = std::atoi(argv[2]), nc = deg + 1;
     if (N < 1 || deg < 1) { std::fprintf(stderr, "need N>=1, degree>=1\n"); return 1; }
     bool useFloat = false;                                    // winding precision (--float|--double)
+    int  argMethod = 0;                                       // 0 atan2, 1 approx, 2 quadrant (--arg)
     for (int a = 3; a < argc; ++a) {
         std::string s = argv[a];
         if      (s == "--float")  useFloat = true;
         else if (s == "--double") useFloat = false;
+        else if (s == "--arg" && a + 1 < argc) {
+            std::string m = argv[++a];
+            if      (m == "atan2")    argMethod = 0;
+            else if (m == "approx")   argMethod = 1;
+            else if (m == "quadrant") argMethod = 2;
+            else { std::fprintf(stderr, "unknown --arg '%s' (atan2|approx|quadrant)\n", m.c_str()); return 1; }
+        }
     }
 
     // read the batch: N polynomials, each nc "re im" pairs (descending), reversed
@@ -193,8 +256,11 @@ int main(int argc, char** argv) {
         if (n > maxTasks) { std::fprintf(stderr, "task cap hit\n"); break; }
         auto g0 = clk::now();
         CK(cudaMemcpy(d_front, frontier.data(), n * sizeof(BatchCell), cudaMemcpyHostToDevice));
-        if (useFloat) batched_winding<float> <<<(int)n, BLK>>>(d_front, d_coeffs, nc, sps, d_counts);
-        else          batched_winding<double><<<(int)n, BLK>>>(d_front, d_coeffs, nc, sps, d_counts);
+        // 6-way compile-time dispatch: {float,double} x {atan2,approx,quadrant}.
+        #define LAUNCH(T,M) batched_winding<T,M><<<(int)n, BLK>>>(d_front, d_coeffs, nc, sps, d_counts)
+        if (useFloat) { if (argMethod==2) LAUNCH(float,2);  else if (argMethod==1) LAUNCH(float,1);  else LAUNCH(float,0); }
+        else          { if (argMethod==2) LAUNCH(double,2); else if (argMethod==1) LAUNCH(double,1); else LAUNCH(double,0); }
+        #undef LAUNCH
         CK(cudaGetLastError()); CK(cudaDeviceSynchronize());
         std::vector<int> counts(n * NSUB);
         CK(cudaMemcpy(counts.data(), d_counts, n * NSUB * sizeof(int), cudaMemcpyDeviceToHost));
@@ -258,6 +324,7 @@ int main(int argc, char** argv) {
     }
 
     std::printf("PRECISION %s\n", useFloat ? "float" : "double");
+    std::printf("ARG %s\n", argMethod == 2 ? "quadrant" : argMethod == 1 ? "approx" : "atan2");
     std::printf("SOLVE_MS %.3f\n", secs * 1e3);
     std::printf("SETUP_MS %.3f\n", t_setup);            // phase breakdown of SOLVE_MS
     std::printf("WINDING_MS %.3f\n", t_wind);           //   GPU winding kernels + transfers

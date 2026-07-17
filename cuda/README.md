@@ -68,6 +68,18 @@ residual `|P(z)|`, so you can sanity-check without knowing the true roots.
    ```
 `sm_75` is the T4's architecture (use `sm_60` for a P100, or drop `-arch`).
 
+The batched throughput solver is built the same way (it needs `-std=c++17`
+for the compile-time `--arg` dispatch):
+```python
+!nvcc -O2 -std=c++17 -arch=sm_75 batched_solve.cu -o batched
+# 10k degree-10 polynomials, float winding, quadrant argument:
+!python3 bench/throughput.py -N 10000 -d 10 --gpu ./batched
+# or one method directly:  ./batched 10000 10 --float --arg quadrant
+```
+`--arg` selects the winding's argument method — `atan2` (default, validated
+reference), `approx` (cheap polynomial atan2), or `quadrant` (sign-based, no
+transcendental). `throughput.py` races all three at float precision.
+
 ## Status
 
 - **Confirmed on hardware:** `p0`, `p2`.

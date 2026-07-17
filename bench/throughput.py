@@ -59,17 +59,20 @@ def main():
     if not os.path.exists(a.gpu):
         print(f"  gpu   : '{a.gpu}' not found (build + run on Kaggle)")
         return
-    for flag in ("--double", "--float"):
-        g, err = run_gpu(a.gpu, polys, a.degree, [flag])
-        tag = flag.lstrip("-")
+    # Race: double+atan2 (validated reference), then float x {atan2, approx,
+    # quadrant} to isolate the argument-method speedup at the winning precision.
+    combos = [("--double", "atan2")] + [("--float", m) for m in ("atan2", "approx", "quadrant")]
+    for prec, arg in combos:
+        g, err = run_gpu(a.gpu, polys, a.degree, [prec, "--arg", arg])
+        tag = f"{prec.lstrip('-')}/{arg}"
         if "THROUGHPUT" not in g:
             print(f"  gpu ({tag}): failed ->", err[:300]); continue
-        print(f"  gpu ({tag:<6})     :  {g['SOLVE_MS']:9.1f} ms   {g['THROUGHPUT']:12.0f} polys/sec"
+        print(f"  gpu ({tag:<15}):  {g['SOLVE_MS']:9.1f} ms   {g['THROUGHPUT']:12.0f} polys/sec"
               f"   (max residual {g['MAXRESIDUAL']:.1e})  {g['THROUGHPUT']/np_tput:.1f}x vs numpy")
         if "ROOTS" in g:
             exp = a.N * a.degree
-            flag = "" if g["ROOTS"] == exp else "   <-- INCOMPLETE (lost roots!)"
-            print(f"      roots found: {int(g['ROOTS'])}/{exp} ({100*g['ROOTS']/exp:.1f}%){flag}")
+            note = "" if g["ROOTS"] == exp else "   <-- INCOMPLETE (lost roots!)"
+            print(f"      roots found: {int(g['ROOTS'])}/{exp} ({100*g['ROOTS']/exp:.1f}%){note}")
             if g["ROOTS"] < exp and err.strip():                  # surface the binary's stderr
                 print(f"      stderr: {err.strip()[:300]}")
         if "WINDING_MS" in g:
