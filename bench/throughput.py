@@ -33,7 +33,7 @@ def run_gpu(binary, polys, deg, extra=None):
     stdin = "\n".join(lines) + "\n"
     r = subprocess.run([binary, str(N), str(deg)] + (extra or []), input=stdin,
                        capture_output=True, text=True, timeout=600)
-    keys = ("SOLVE_MS", "THROUGHPUT", "MAXRESIDUAL",
+    keys = ("SOLVE_MS", "THROUGHPUT", "MAXRESIDUAL", "ROOTS",
             "SETUP_MS", "WINDING_MS", "TRIAGE_MS", "NEWTON_MS")
     out = {}
     for line in r.stdout.splitlines():
@@ -66,6 +66,10 @@ def main():
             print(f"  gpu ({tag}): failed ->", err[:300]); continue
         print(f"  gpu ({tag:<6})     :  {g['SOLVE_MS']:9.1f} ms   {g['THROUGHPUT']:12.0f} polys/sec"
               f"   (max residual {g['MAXRESIDUAL']:.1e})  {g['THROUGHPUT']/np_tput:.1f}x vs numpy")
+        if "ROOTS" in g:
+            exp = a.N * a.degree
+            flag = "" if g["ROOTS"] == exp else "   <-- INCOMPLETE (lost roots!)"
+            print(f"      roots found: {int(g['ROOTS'])}/{exp} ({100*g['ROOTS']/exp:.1f}%){flag}")
         if "WINDING_MS" in g:
             print(f"      breakdown: setup {g['SETUP_MS']:.1f} | winding {g['WINDING_MS']:.1f} | "
                   f"triage {g['TRIAGE_MS']:.1f} | newton {g['NEWTON_MS']:.1f}  (ms)")
