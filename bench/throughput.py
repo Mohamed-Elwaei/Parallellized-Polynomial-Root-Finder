@@ -13,10 +13,28 @@ The GPU binary is skipped if not present (so the NumPy side runs anywhere).
 import argparse, subprocess, time, os
 import numpy as np
 
-def gen_batch(N, deg, seed=0):
-    """N random degree-`deg` polynomials (from random complex roots)."""
+def gen_batch(N, deg, seed=0, scale=1.0):
+    """N random degree-`deg` polynomials, built from random complex roots.
+
+    Roots are uniform on the square [-1,1]^2, then multiplied by `scale`.
+    Scaling does NOT change the difficulty in any mathematical sense -- relative
+    geometry, and hence conditioning, is identical. It is a knob for testing the
+    solver's SCALE INVARIANCE: every threshold compared against a length must
+    track the root bound, and a fixed scale hides it when they don't (that is
+    exactly how the isoThresh bug survived so long).
+    """
     rng = np.random.default_rng(seed)
-    return [np.poly(rng.uniform(-1, 1, deg) + 1j * rng.uniform(-1, 1, deg)) for _ in range(N)]
+    return [np.poly(scale * (rng.uniform(-1, 1, deg) + 1j * rng.uniform(-1, 1, deg)))
+            for _ in range(N)]
+
+def float_root_limit(deg):
+    """Largest root magnitude --float can represent at this degree.
+
+    What must fit in float is |P(z)| on the contour ~ sum |c_k|*R^k, not the
+    coefficients. For well-spread roots of magnitude s the contour corner sits
+    near 3.12*s, so the binding condition is (3.12*s)^deg < FLT_MAX.
+    """
+    return (3.4028235e38 ** (1.0 / deg)) / 3.12
 
 def run_numpy(polys):
     t0 = time.perf_counter()
@@ -42,15 +60,54 @@ def run_gpu(binary, polys, deg, extra=None):
             out[p[0]] = float(p[1])
     return out, r.stderr
 
+def scale_sweep(gpu, N, deg, scales):
+    """Solve the SAME polynomials at wildly different scales.
+
+    Relative geometry is identical at every scale, so a scale-invariant solver
+    must return the same completeness throughout. Also shows the --float
+    representability wall: past `float_root_limit(deg)` the cast to single
+    precision overflows and the binary warns.
+    """
+    lim = float_root_limit(deg)
+    print(f"\nscale sweep: N={N} degree={deg}")
+    print(f"  roots are uniform on [-1,1]^2 * scale, so max |root| ~ 1.41*scale")
+    print(f"  --float representability limit at degree {deg}: |root| <~ {lim:.3g}\n")
+    print(f"  {'scale':>9}  {'double':>18}  {'float':>18}  note")
+    for s in scales:
+        polys = gen_batch(N, deg, scale=s)
+        cells, note = [], ""
+        for prec in ("--double", "--float"):
+            g, err = run_gpu(gpu, polys, deg, [prec, "--policy", "gather"])
+            if "ROOTS" not in g:
+                cells.append("failed"); continue
+            exp = N * deg
+            cells.append(f"{int(g['ROOTS'])}/{exp} ({100*g['ROOTS']/exp:6.2f}%)")
+            if prec == "--float" and "cannot represent" in err:
+                note = "float guard fired (expected past the limit)"
+        over = 1.41 * s > lim
+        if over and not note:
+            note = "!! past float limit but NO warning"
+        print(f"  {s:>9.0e}  {cells[0]:>18}  {cells[1]:>18}  {note}")
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gpu", default="./batched")
     ap.add_argument("-N", type=int, default=10000)
     ap.add_argument("-d", "--degree", type=int, default=10)
+    ap.add_argument("--scale", type=float, default=1.0,
+                    help="multiply all roots by this (tests scale invariance)")
+    ap.add_argument("--scale-sweep", action="store_true",
+                    help="sweep several scales instead of racing the policies")
     a = ap.parse_args()
 
-    print(f"batch: N={a.N} polynomials, degree={a.degree}")
-    polys = gen_batch(a.N, a.degree)
+    if a.scale_sweep:
+        if not os.path.exists(a.gpu):
+            print(f"gpu binary '{a.gpu}' not found"); return
+        scale_sweep(a.gpu, a.N, a.degree, [1e-6, 1e-3, 1e0, 1e3, 1e6])
+        return
+
+    print(f"batch: N={a.N} polynomials, degree={a.degree}, root scale={a.scale:g}")
+    polys = gen_batch(a.N, a.degree, scale=a.scale)
 
     tnp = run_numpy(polys)
     np_tput = a.N / tnp

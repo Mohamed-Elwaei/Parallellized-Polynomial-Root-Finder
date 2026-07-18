@@ -75,6 +75,12 @@ for the compile-time `--arg` dispatch):
 # 10k degree-10 polynomials, float winding, gather policy:
 !python3 bench/throughput.py -N 10000 -d 10 --gpu ./batched
 # or one config directly:  ./batched 10000 10 --float --arg atan2 --policy gather
+
+# scale invariance on hardware: same relative geometry, scales 1e-6 .. 1e6.
+# Completeness must not vary with scale; the --float guard should fire only
+# past the representability limit for that degree (see the table below).
+!python3 bench/throughput.py --scale-sweep -N 2000 -d 10 --gpu ./batched
+# single scale:  !python3 bench/throughput.py --scale 1e3 -N 10000 -d 10 --gpu ./batched
 ```
 `--arg` selects the winding's argument method — `atan2` (default, validated
 reference), `approx` (cheap polynomial atan2), or `quadrant` (sign-based, no
