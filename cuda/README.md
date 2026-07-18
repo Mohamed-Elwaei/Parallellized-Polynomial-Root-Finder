@@ -72,13 +72,21 @@ The batched throughput solver is built the same way (it needs `-std=c++17`
 for the compile-time `--arg` dispatch):
 ```python
 !nvcc -O2 -std=c++17 -arch=sm_75 batched_solve.cu -o batched
-# 10k degree-10 polynomials, float winding, quadrant argument:
+# 10k degree-10 polynomials, float winding, gather policy:
 !python3 bench/throughput.py -N 10000 -d 10 --gpu ./batched
-# or one method directly:  ./batched 10000 10 --float --arg quadrant
+# or one config directly:  ./batched 10000 10 --float --arg atan2 --policy gather
 ```
 `--arg` selects the winding's argument method — `atan2` (default, validated
 reference), `approx` (cheap polynomial atan2), or `quadrant` (sign-based, no
-transcendental). `throughput.py` races all three at float precision.
+transcendental). Measurement showed the arg method makes **no** difference on
+GPU (the winding is Horner-bound, not transcendental-bound).
+
+`--policy` selects how the sub-grid edges are evaluated — `naive` (default; each
+subcell samples its own 4 edges, interior edges recomputed twice), `gather`
+(fill a shared canonical edge table once, each subcell reads its 4 edges), or
+`scatter` (each edge computed once, atomic-added into its two neighbour cells).
+`gather`/`scatter` do ~1.7x fewer Horner evals than `naive`. `throughput.py`
+races the three policies at float precision.
 
 ## Status
 

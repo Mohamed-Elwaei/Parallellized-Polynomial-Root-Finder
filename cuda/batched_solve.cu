@@ -26,6 +26,7 @@
 #include <chrono>
 #include <iostream>
 #include <string>
+#include <type_traits>
 
 constexpr int K    = 8;          // KxK sub-grid per cell
 constexpr int NSUB = K * K;
@@ -156,10 +157,19 @@ __device__ inline int winding_dispatch(const cmplx* C, int nc, T cx, T cy, T h, 
     else                            return wind_angle<T, LibAtan2<T>>(C, nc, cx, cy, h, sps);
 }
 
-// One block per (poly,cell) task, 64 threads over the sub-grid.
+// ===== winding POLICIES (selectable via --policy) ============================
+// naive : one thread per subcell, samples its OWN 4 edges (interior edges are
+//         recomputed by both neighbours).
+// gather: threads fill a shared canonical edge table ONCE, then each subcell
+//         READS its 4 edges from it (no atomics; each shared edge evaluated once).
+// scatter: threads compute each edge once and atomicAdd its oriented contribution
+//         into the two adjacent subcells' shared accumulator (nondeterministic add).
+// gather/scatter do ~1.7x fewer Horner evals than naive (144 edges vs 256).
+
+// --- NAIVE ---
 template<class T, int METHOD>
-__global__ void batched_winding(const BatchCell* frontier, const cmplx* coeffs,
-                                int nc, int sps, int* counts) {
+__global__ void batched_winding_naive(const BatchCell* frontier, const cmplx* coeffs,
+                                      int nc, int sps, int* counts) {
     int b = blockIdx.x;
     BatchCell tk = frontier[b];
     const cmplx* C = coeffs + (size_t)tk.poly * nc;           // <-- this poly's row
@@ -170,6 +180,104 @@ __global__ void batched_winding(const BatchCell* frontier, const cmplx* coeffs,
         T ctry = T(tk.cy) - T(tk.half) + (2*j+1) * h;
         counts[(size_t)b * NSUB + t] = winding_dispatch<T, METHOD>(C, nc, ctrx, ctry, h, sps);
     }
+}
+
+// Accumulated phase along segment A->B (sps steps). Angle methods return radians;
+// quadrant returns net signed transitions. Both are path-additive and negate on
+// reversal, so a subcell winding = sum of its 4 oriented edges.
+template<class T, int METHOD>
+__device__ T edge_phase(const cmplx* C, int nc, T ax, T ay, T bx, T by, int sps) {
+    if constexpr (METHOD == 2) {
+        thrust::complex<T> wp = heval_T<T>(C, nc, thrust::complex<T>(ax, ay));
+        int qp = quadrant_of<T>(wp), net = 0;
+        for (int k = 1; k <= sps; ++k) {
+            T t = T(k) / sps;
+            thrust::complex<T> w = heval_T<T>(C, nc, thrust::complex<T>(ax + (bx-ax)*t, ay + (by-ay)*t));
+            int q = quadrant_of<T>(w), d = (q - qp + 4) % 4;
+            if      (d == 1) net += 1;
+            else if (d == 3) net -= 1;
+            else if (d == 2) { T cr = wp.real()*w.imag() - wp.imag()*w.real(); net += (cr >= 0) ? 2 : -2; }
+            qp = q; wp = w;
+        }
+        return T(net);
+    } else {
+        using AngleFn = typename std::conditional<METHOD == 1, ApproxAtan2<T>, LibAtan2<T>>::type;
+        AngleFn ang; const T PI = T(3.14159265358979323846);
+        T prev = ang(heval_T<T>(C, nc, thrust::complex<T>(ax, ay))), tot = 0;
+        for (int k = 1; k <= sps; ++k) {
+            T t = T(k) / sps;
+            T cur = ang(heval_T<T>(C, nc, thrust::complex<T>(ax + (bx-ax)*t, ay + (by-ay)*t)));
+            T d = cur - prev;
+            while (d <= -PI) d += 2 * PI;
+            while (d >   PI) d -= 2 * PI;
+            tot += d; prev = cur;
+        }
+        return tot;
+    }
+}
+// Turn an accumulated subcell sum into an integer root count.
+template<class T, int METHOD>
+__device__ inline int edge_finalize(T s) {
+    double v = (METHOD == 2) ? (double)s / 4.0 : (double)s / (2 * 3.14159265358979323846);
+    return (int)(v >= 0 ? v + 0.5 : v - 0.5);
+}
+
+// grid line coordinate helpers (K+1 lines per axis)
+template<class T> __device__ inline T gridX(const BatchCell& tk, T h, int i) { return T(tk.cx) - T(tk.half) + i * 2 * h; }
+template<class T> __device__ inline T gridY(const BatchCell& tk, T h, int j) { return T(tk.cy) - T(tk.half) + j * 2 * h; }
+
+// --- GATHER: shared canonical edge tables, each subcell reads its 4 edges ---
+template<class T, int METHOD>
+__global__ void batched_winding_gather(const BatchCell* frontier, const cmplx* coeffs,
+                                       int nc, int sps, int* counts) {
+    int b = blockIdx.x;
+    BatchCell tk = frontier[b];
+    const cmplx* C = coeffs + (size_t)tk.poly * nc;
+    T h = T(tk.half) / K;
+    __shared__ T Hd[K * (K + 1)];    // horizontal edges (L->R), idx = j*K + i, i in [0,K), j in [0,K]
+    __shared__ T Vd[(K + 1) * K];    // vertical   edges (B->T), idx = j*(K+1) + i, i in [0,K], j in [0,K)
+    for (int e = threadIdx.x; e < K * (K + 1); e += blockDim.x) {
+        int i = e % K, j = e / K;
+        Hd[e] = edge_phase<T, METHOD>(C, nc, gridX<T>(tk,h,i), gridY<T>(tk,h,j), gridX<T>(tk,h,i+1), gridY<T>(tk,h,j), sps);
+    }
+    for (int e = threadIdx.x; e < (K + 1) * K; e += blockDim.x) {
+        int i = e % (K + 1), j = e / (K + 1);
+        Vd[e] = edge_phase<T, METHOD>(C, nc, gridX<T>(tk,h,i), gridY<T>(tk,h,j), gridX<T>(tk,h,i), gridY<T>(tk,h,j+1), sps);
+    }
+    __syncthreads();
+    for (int t = threadIdx.x; t < NSUB; t += blockDim.x) {
+        int i = t % K, j = t / K;
+        T s = Hd[j*K + i] + Vd[j*(K+1) + (i+1)] - Hd[(j+1)*K + i] - Vd[j*(K+1) + i];
+        counts[(size_t)b * NSUB + t] = edge_finalize<T, METHOD>(s);
+    }
+}
+
+// --- SCATTER: each edge pushes its oriented phase into its <=2 neighbour cells ---
+template<class T, int METHOD>
+__global__ void batched_winding_scatter(const BatchCell* frontier, const cmplx* coeffs,
+                                        int nc, int sps, int* counts) {
+    int b = blockIdx.x;
+    BatchCell tk = frontier[b];
+    const cmplx* C = coeffs + (size_t)tk.poly * nc;
+    T h = T(tk.half) / K;
+    __shared__ T M[NSUB];
+    for (int t = threadIdx.x; t < NSUB; t += blockDim.x) M[t] = T(0);
+    __syncthreads();
+    for (int e = threadIdx.x; e < K * (K + 1); e += blockDim.x) {   // horizontal edges
+        int i = e % K, j = e / K;
+        T ph = edge_phase<T, METHOD>(C, nc, gridX<T>(tk,h,i), gridY<T>(tk,h,j), gridX<T>(tk,h,i+1), gridY<T>(tk,h,j), sps);
+        if (j < K) atomicAdd(&M[j*K + i], ph);          // bottom of (i,j)
+        if (j > 0) atomicAdd(&M[(j-1)*K + i], -ph);     // top of (i,j-1)
+    }
+    for (int e = threadIdx.x; e < (K + 1) * K; e += blockDim.x) {   // vertical edges
+        int i = e % (K + 1), j = e / (K + 1);
+        T ph = edge_phase<T, METHOD>(C, nc, gridX<T>(tk,h,i), gridY<T>(tk,h,j), gridX<T>(tk,h,i), gridY<T>(tk,h,j+1), sps);
+        if (i < K) atomicAdd(&M[j*K + i], -ph);         // left of (i,j)
+        if (i > 0) atomicAdd(&M[j*K + (i-1)], ph);      // right of (i-1,j)
+    }
+    __syncthreads();
+    for (int t = threadIdx.x; t < NSUB; t += blockDim.x)
+        counts[(size_t)b * NSUB + t] = edge_finalize<T, METHOD>(M[t]);
 }
 
 // ---- Newton: one thread per isolated cell ----------------------------------
@@ -189,13 +297,26 @@ __global__ void batched_newton(const BatchCell* iso, int m, const cmplx* coeffs,
 
 static int nblocks(int n, int b) { return (n + b - 1) / b; }
 
+// Launch the winding for a fixed (precision T, arg METHOD), picking the policy
+// kernel at run time (host-side branch, once per BFS level — negligible). Each
+// kernel is a distinct specialization, so the device hot loop stays inlined.
+template<class T, int METHOD>
+static void launch_winding(int policy, size_t n, const BatchCell* d_front,
+                           const cmplx* d_coeffs, int nc, int sps, int* d_counts) {
+    if      (policy == 1) batched_winding_gather <T,METHOD><<<(int)n, BLK>>>(d_front, d_coeffs, nc, sps, d_counts);
+    else if (policy == 2) batched_winding_scatter<T,METHOD><<<(int)n, BLK>>>(d_front, d_coeffs, nc, sps, d_counts);
+    else                  batched_winding_naive  <T,METHOD><<<(int)n, BLK>>>(d_front, d_coeffs, nc, sps, d_counts);
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) { std::fprintf(stderr,
-        "usage: batched_solve <N> <degree> [--float|--double] [--arg atan2|approx|quadrant]\n"); return 1; }
+        "usage: batched_solve <N> <degree> [--float|--double] [--arg atan2|approx|quadrant] "
+        "[--policy naive|gather|scatter]\n"); return 1; }
     int N = std::atoi(argv[1]), deg = std::atoi(argv[2]), nc = deg + 1;
     if (N < 1 || deg < 1) { std::fprintf(stderr, "need N>=1, degree>=1\n"); return 1; }
     bool useFloat = false;                                    // winding precision (--float|--double)
     int  argMethod = 0;                                       // 0 atan2, 1 approx, 2 quadrant (--arg)
+    int  policy    = 0;                                       // 0 naive, 1 gather, 2 scatter (--policy)
     for (int a = 3; a < argc; ++a) {
         std::string s = argv[a];
         if      (s == "--float")  useFloat = true;
@@ -206,6 +327,13 @@ int main(int argc, char** argv) {
             else if (m == "approx")   argMethod = 1;
             else if (m == "quadrant") argMethod = 2;
             else { std::fprintf(stderr, "unknown --arg '%s' (atan2|approx|quadrant)\n", m.c_str()); return 1; }
+        }
+        else if (s == "--policy" && a + 1 < argc) {
+            std::string m = argv[++a];
+            if      (m == "naive")   policy = 0;
+            else if (m == "gather")  policy = 1;
+            else if (m == "scatter") policy = 2;
+            else { std::fprintf(stderr, "unknown --policy '%s' (naive|gather|scatter)\n", m.c_str()); return 1; }
         }
     }
 
@@ -256,8 +384,9 @@ int main(int argc, char** argv) {
         if (n > maxTasks) { std::fprintf(stderr, "task cap hit\n"); break; }
         auto g0 = clk::now();
         CK(cudaMemcpy(d_front, frontier.data(), n * sizeof(BatchCell), cudaMemcpyHostToDevice));
-        // 6-way compile-time dispatch: {float,double} x {atan2,approx,quadrant}.
-        #define LAUNCH(T,M) batched_winding<T,M><<<(int)n, BLK>>>(d_front, d_coeffs, nc, sps, d_counts)
+        // dispatch {float,double} x {atan2,approx,quadrant} at compile time;
+        // launch_winding then picks the policy kernel (naive|gather|scatter).
+        #define LAUNCH(T,M) launch_winding<T,M>(policy, n, d_front, d_coeffs, nc, sps, d_counts)
         if (useFloat) { if (argMethod==2) LAUNCH(float,2);  else if (argMethod==1) LAUNCH(float,1);  else LAUNCH(float,0); }
         else          { if (argMethod==2) LAUNCH(double,2); else if (argMethod==1) LAUNCH(double,1); else LAUNCH(double,0); }
         #undef LAUNCH
@@ -325,6 +454,7 @@ int main(int argc, char** argv) {
 
     std::printf("PRECISION %s\n", useFloat ? "float" : "double");
     std::printf("ARG %s\n", argMethod == 2 ? "quadrant" : argMethod == 1 ? "approx" : "atan2");
+    std::printf("POLICY %s\n", policy == 2 ? "scatter" : policy == 1 ? "gather" : "naive");
     std::printf("SOLVE_MS %.3f\n", secs * 1e3);
     std::printf("SETUP_MS %.3f\n", t_setup);            // phase breakdown of SOLVE_MS
     std::printf("WINDING_MS %.3f\n", t_wind);           //   GPU winding kernels + transfers

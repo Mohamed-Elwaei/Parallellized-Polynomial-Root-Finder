@@ -59,12 +59,14 @@ def main():
     if not os.path.exists(a.gpu):
         print(f"  gpu   : '{a.gpu}' not found (build + run on Kaggle)")
         return
-    # Race: double+atan2 (validated reference), then float x {atan2, approx,
-    # quadrant} to isolate the argument-method speedup at the winning precision.
-    combos = [("--double", "atan2")] + [("--float", m) for m in ("atan2", "approx", "quadrant")]
-    for prec, arg in combos:
-        g, err = run_gpu(a.gpu, polys, a.degree, [prec, "--arg", arg])
-        tag = f"{prec.lstrip('-')}/{arg}"
+    # Race: double/naive (validated reference), then float x {naive, gather,
+    # scatter} to isolate the winding-policy speedup at the winning precision.
+    # (The arg method is fixed to atan2 — measurement showed it doesn't matter.)
+    combos = [("--double", "atan2", "naive")] + [("--float", "atan2", p)
+                                                 for p in ("naive", "gather", "scatter")]
+    for prec, arg, pol in combos:
+        g, err = run_gpu(a.gpu, polys, a.degree, [prec, "--arg", arg, "--policy", pol])
+        tag = f"{prec.lstrip('-')}/{pol}"
         if "THROUGHPUT" not in g:
             print(f"  gpu ({tag}): failed ->", err[:300]); continue
         print(f"  gpu ({tag:<15}):  {g['SOLVE_MS']:9.1f} ms   {g['THROUGHPUT']:12.0f} polys/sec"
