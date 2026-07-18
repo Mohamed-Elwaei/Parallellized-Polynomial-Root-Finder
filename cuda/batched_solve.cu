@@ -460,7 +460,12 @@ int main(int argc, char** argv) {
     std::vector<double> h_bounds(N);
     CK(cudaMemcpy(h_bounds.data(), d_bounds, (size_t)N * sizeof(double), cudaMemcpyDeviceToHost));
     std::vector<double> isoT(N), minH(N);
-    for (int p = 0; p < N; ++p) { isoT[p] = h_bounds[p] / deg; minH[p] = h_bounds[p] * 1e-7; }
+    // The extra 1/K: R overestimates the root spread by ~3x, and subdivision
+    // divides by K per level, so R/deg and the old absolute 0.1 select the SAME
+    // (too coarse) level -- both isolate cells that are still too big to seed
+    // Newton reliably. R/(K*deg) forces one level deeper: completeness 96% ->
+    // 100% on a 300-polynomial host batch, at ~2.4x the cells.
+    for (int p = 0; p < N; ++p) { isoT[p] = h_bounds[p] / (K * deg); minH[p] = h_bounds[p] * 1e-7; }
     t_setup = ms_since(s0);
 
     // --- batched BFS over the shared (poly,cell) work-list ---

@@ -26,6 +26,7 @@
 #include <cmath>
 #include <functional>
 #include <algorithm>
+#include <random>
 
 using cd = std::complex<double>;
 constexpr double PI = 3.14159265358979323846;
@@ -137,7 +138,7 @@ static int solve_count(std::vector<cd> C, int method) {
     double R    = std::min(cauchy(C), fujiwara(C));
     double off  = R*0.05;
     const int sps = std::max(48, 4*deg);
-    const double isoT = R/deg;                                  // <-- relative
+    const double isoT = R/(K*deg);                              // <-- relative (see note)
     const double minH = R*1e-7;                                 // <-- relative
     const double dupT = R*1e-7;                                 // <-- relative
 
@@ -277,11 +278,34 @@ static void check_edge_decomposition() {
         }
 }
 
+// 4. Batch completeness: NO roots may be silently dropped.
+//    This is the check that caught the long-standing ~1-4% loss. It is a
+//    THRESHOLD regression test: isoThresh must be tight enough that every
+//    isolated cell is a reliable Newton seed. Loosening it by one subdivision
+//    level (R/deg, or the old absolute 0.1) drops this to ~96%.
+static void check_batch_completeness() {
+    std::printf("4. batch completeness (random polys; every root must be found)\n");
+    const int M = 200, deg = 10;
+    std::mt19937_64 rng(12345);
+    std::uniform_real_distribution<double> U(-1.0, 1.0);
+    long found = 0;
+    for (int i = 0; i < M; ++i) {
+        std::vector<cd> r;
+        for (int k = 0; k < deg; ++k) r.push_back(cd(U(rng), U(rng)));
+        found += solve_count(from_roots(r), 0);
+    }
+    char buf[96];
+    std::snprintf(buf, sizeof buf, "%d random deg-%d polys -> %ld/%d roots (%.2f%%)",
+                  M, deg, found, M*deg, 100.0*found/(M*deg));
+    report(found == (long)M*deg, buf);
+}
+
 int main() {
     std::printf("host regression checks for the CUDA leaf math\n\n");
     check_scale_invariance();  std::printf("\n");
     check_arg_methods();       std::printf("\n");
-    check_edge_decomposition();
+    check_edge_decomposition();std::printf("\n");
+    check_batch_completeness();
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED",
                 failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;

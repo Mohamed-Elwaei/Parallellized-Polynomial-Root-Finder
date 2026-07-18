@@ -164,7 +164,14 @@ std::vector<Found> solve(const std::vector<cmplx>& C, const std::vector<cmplx>& 
     // R ~ 1: scale the same roots down 10x and it isolates a level too early
     // and drops roots (measured: 8/10 at scale <= 0.1). Relative: 10/10 over
     // 1e-9..1e+9.
-    const double isoThresh = R / std::max(1, nc - 1);
+    // The extra 1/K is not cosmetic: R (Cauchy/Fujiwara) OVERESTIMATES the root
+    // spread by ~3x, so R/n overestimates the true spacing. Since subdivision
+    // divides by K per level, any threshold within a factor of K picks the same
+    // level -- R/n and the old absolute 0.1 land on the SAME (too coarse) level.
+    // R/(K*n) forces exactly one level deeper, which is what takes completeness
+    // from ~96% to 100% (measured over a 300-polynomial host batch). Costs ~2.4x
+    // the cells; that is the price of not silently dropping roots.
+    const double isoThresh = R / (K * std::max(1, nc - 1));
     const double minHalf = R * 1e-7;
     const int maxLevel = 60;
     const size_t maxF = 1u << 16;

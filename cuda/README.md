@@ -90,12 +90,24 @@ races the three policies at float precision.
 
 ### Measured (T4, N=10000 polynomials, degree 10)
 
+> ⚠️ **These timings predate the `isoThresh` tightening** (see below) and were
+> taken at ~96–99% completeness. The *relative* ordering of the policies still
+> holds, but the absolute throughput is now lower (roughly 2.4x the cells) and
+> completeness is 100%. Re-measure before quoting these numbers.
+
 | config | winding ms | polys/sec | vs numpy |
 |-----------------|-----------:|----------:|---------:|
 | double / naive  |     1362.7 |     7 155 |     1.0x |
 | float / naive   |      208.7 |    40 341 |     5.4x |
 | float / scatter |      186.4 |    44 697 |     6.0x |
 | **float / gather** | **162.2** | **50 068** | **6.7x** |
+
+**Completeness comes first.** `isoThresh` is now `R/(K*deg)` — one subdivision
+level tighter than `R/deg`. Because subdivision divides by `K = 8` per level,
+`R/deg` and the old absolute `0.1` selected the *same* too-coarse level, and
+both handed Newton cells that were still too large to seed reliably. That —
+not clustering — was the long-standing few-percent root loss. Tightening it
+takes a 300-polynomial host batch from ~96% to **100.00%**, at ~2.4x the cells.
 
 Three findings worth keeping:
 
@@ -148,9 +160,10 @@ Exits non-zero on failure, so it can be wired into CI.
 - **Confirmed on hardware:** `p0`, `p2`, `batched_solve` (all 3 precisions x
   3 arg methods x 3 policies; see the measured table above).
 - **Host-validated, not yet run on hardware:** `p1`, `scatter`, `pluggable_solver`.
-- **Known gap — ~1.1% of roots are lost** (98.9% found on a 10k batch of random
-  degree-10 polynomials, in *every* config). This is not a policy or precision
-  artifact; it is the cluster / Newton-basin limitation below.
+- **Root loss (was ~1-4%) is fixed** — it was `isoThresh` being one subdivision
+  level too coarse, *not* the cluster limitation it was long assumed to be. A
+  300-polynomial host batch now finds 100.00% of roots; `host_checks` check 4
+  pins this so it cannot silently regress.
 - **Deferred (same as the CPU Phase-2 gaps):** cluster / high-multiplicity roots
   are dropped rather than resolved; fixed `sps` can miscount a root that *grazes*
   a sub-grid line (the CPU handles this with adaptive sampling); timing in
