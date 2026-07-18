@@ -103,7 +103,13 @@ cmplx newton_polish(const cmplx* coeff, int nc, const cmplx* dcoeff, int dn, cmp
         cmplx p = poly_eval(coeff, nc, z), d = poly_eval(dcoeff, dn, z);
         if (thrust::abs(d) < 1e-300) break;
         cmplx step = p / d; z -= step;
-        if (thrust::abs(step) < 1e-15) break;
+        // RELATIVE convergence test. An absolute `< 1e-15` is scale-dependent:
+        // for roots of magnitude ~1e-9 it stops at only ~1e-6 relative accuracy,
+        // and for magnitude ~1e9 it never triggers. Comparing against |z| makes
+        // the accuracy achieved independent of the problem's scale. (A root at
+        // exactly 0 gives a zero tolerance and simply runs the iteration cap,
+        // which is harmless -- quadratic convergence gets there long before.)
+        if (thrust::abs(step) <= 1e-15 * thrust::abs(z)) break;
     }
     return z;
 }

@@ -155,11 +155,17 @@ std::vector<Found> solve(const std::vector<cmplx>& C, const std::vector<cmplx>& 
     // densely-packed roots (mirrors the CPU's ~4*degree adaptive count).
     const int sps = std::max(48, 4 * (nc - 1));
     // Isolate a count==1 cell only once it is small enough that its CENTER is a
-    // reliable Newton seed. Too large (the old 0.5) and Newton escapes across
-    // the fractal basin boundary to a neighbouring root -- catastrophic for
-    // densely-packed roots (e.g. roots of unity), where the basins shrink ~1/n.
-    const double isoThresh = std::min(0.5, 1.0 / std::max(1, nc - 1));
-    const double minHalf = 1e-6;
+    // reliable Newton seed. Too large and Newton escapes across the fractal
+    // basin boundary to a neighbouring root -- catastrophic for densely-packed
+    // roots (e.g. roots of unity), where the basins shrink ~1/n.
+    //
+    // Both thresholds are LENGTHS, so both must scale with the root bound R or
+    // the solver is not scale-invariant. An absolute `min(0.5, 1/deg)` assumes
+    // R ~ 1: scale the same roots down 10x and it isolates a level too early
+    // and drops roots (measured: 8/10 at scale <= 0.1). Relative: 10/10 over
+    // 1e-9..1e+9.
+    const double isoThresh = R / std::max(1, nc - 1);
+    const double minHalf = R * 1e-7;
     const int maxLevel = 60;
     const size_t maxF = 1u << 16;
 
@@ -217,7 +223,10 @@ std::vector<Found> solve(const std::vector<cmplx>& C, const std::vector<cmplx>& 
         CK(cudaFree(d_out)); CK(cudaFree(d_ok));
         for (int i = 0; i < m; ++i) {                              // polished point roots
             if (!ok[i]) continue; bool dup = false;
-            for (auto& f : found) if (!f.cluster && thrust::abs(f.z - out[i]) < 1e-6) { dup = true; break; }
+            // Scales with R for the same reason as isoThresh: an absolute 1e-6
+            // merges every distinct root of a small-scale polynomial into one.
+            const double dupTol = R * 1e-7;
+            for (auto& f : found) if (!f.cluster && thrust::abs(f.z - out[i]) < dupTol) { dup = true; break; }
             if (!dup) found.push_back({ out[i], 1, 0.0, false });
         }
     }

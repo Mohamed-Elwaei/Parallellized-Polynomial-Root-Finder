@@ -88,12 +88,74 @@ subcell samples its own 4 edges, interior edges recomputed twice), `gather`
 `gather`/`scatter` do ~1.7x fewer Horner evals than `naive`. `throughput.py`
 races the three policies at float precision.
 
+### Measured (T4, N=10000 polynomials, degree 10)
+
+| config | winding ms | polys/sec | vs numpy |
+|-----------------|-----------:|----------:|---------:|
+| double / naive  |     1362.7 |     7 155 |     1.0x |
+| float / naive   |      208.7 |    40 341 |     5.4x |
+| float / scatter |      186.4 |    44 697 |     6.0x |
+| **float / gather** | **162.2** | **50 068** | **6.7x** |
+
+Three findings worth keeping:
+
+1. **`--float` is the big win (~5x).** fp64 runs at 1/32 rate on a T4, and the
+   winding only has to *count* roots — Newton still polishes in double, so the
+   final accuracy is unchanged (max residual 7.2e-15 in every config).
+2. **`--arg` makes no measurable difference.** Replacing `atan2` with a cheap
+   polynomial, or removing the transcendental entirely (`quadrant`), leaves the
+   time unchanged: the winding is bound by the **Horner evaluation**, not the
+   argument. All three return identical roots. Kept as a selectable knob because
+   it definitively answers the question, not because it pays.
+3. **`gather` beats `scatter`.** Both evaluate the same 144 edges once, but
+   scatter's shared-memory `atomicAdd`s contend (4 edges hit each subcell
+   accumulator). `gather` is also *marginally more complete* (98919 vs naive's
+   98916 roots) because a shared edge is computed once, so both neighbouring
+   subcells see bit-identical boundary values instead of two independent
+   float recomputations.
+
+**Recommended: `--float --policy gather`.** Note `scatter` is nondeterministic
+run-to-run (float atomic ordering); `naive`/`gather` are reproducible.
+
+## Host regression checks (no GPU needed)
+
+The kernels need a GPU, but every numerical decision they make is ordinary
+double arithmetic. [`tests/host_checks.cpp`](tests/host_checks.cpp) mirrors that
+leaf math on the host so it runs anywhere:
+
+```bash
+g++ -O2 -std=c++17 cuda/tests/host_checks.cpp -o host_checks && ./host_checks
+```
+
+It pins three properties, each of which was expensive to discover:
+
+1. **Scale invariance** — the same roots scaled over `1e-9 .. 1e+9` must all
+   give 10/10. Four *absolute* constants each broke this independently
+   (`isoThresh`, `minHalf`, the Newton step tolerance, the dedup tolerance);
+   with them restored the check fails 1/10 at scale `1e-9`, 8/10 at `1e-3`, and
+   **passes at scale >= 1** — which is precisely why a benchmark fixed at
+   roots in [-1,1]^2 never caught it.
+2. **Argument methods agree** — `atan2` / `approx` / `quadrant` must find the
+   same roots.
+3. **Edge decomposition** — `gather` and `scatter` must reproduce `naive`'s
+   counts on all 64 subcells. This is where an edge orientation sign error
+   would surface; on hardware it would just silently miscount.
+
+Exits non-zero on failure, so it can be wired into CI.
+
 ## Status
 
-- **Confirmed on hardware:** `p0`, `p2`.
+- **Confirmed on hardware:** `p0`, `p2`, `batched_solve` (all 3 precisions x
+  3 arg methods x 3 policies; see the measured table above).
 - **Host-validated, not yet run on hardware:** `p1`, `scatter`, `pluggable_solver`.
+- **Known gap — ~1.1% of roots are lost** (98.9% found on a 10k batch of random
+  degree-10 polynomials, in *every* config). This is not a policy or precision
+  artifact; it is the cluster / Newton-basin limitation below.
 - **Deferred (same as the CPU Phase-2 gaps):** cluster / high-multiplicity roots
   are dropped rather than resolved; fixed `sps` can miscount a root that *grazes*
   a sub-grid line (the CPU handles this with adaptive sampling); timing in
   `pluggable_solver` is coarse host wall-clock (switch to CUDA events for a
   precise winding-only comparison).
+- **Next unexploited redundancy:** `gather` removed the shared-*edge* recompute,
+  but the (K+1)^2 grid *corners* are still evaluated once per incident edge (up
+  to 4x). Precomputing them per block would shave more, with diminishing returns.

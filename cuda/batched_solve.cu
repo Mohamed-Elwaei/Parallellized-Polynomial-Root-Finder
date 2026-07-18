@@ -9,16 +9,31 @@
 // v1 scope: all polynomials the same degree (dense N x (deg+1) coefficient
 // matrix), per-polynomial root bound, host-driven BFS (the work-list lives on
 // the host; moving it on-device with CUB is the v2 win). One block per
-// (poly,cell) task; 64 threads split that cell's 8x8 sub-grid (naive winding).
+// (poly,cell) task; 64 threads cooperate on that cell's 8x8 sub-grid.
 //
-// I/O:  ./batched_solve <N> <degree>    then N*(degree+1) "re im" pairs on stdin
+// I/O:  ./batched <N> <degree> [flags]   then N*(degree+1) "re im" pairs on stdin
 //       (each polynomial's coeffs DESCENDING, polynomials back to back).
-// Out:  SOLVE_MS <ms>   THROUGHPUT <polys/sec>   MAXRESIDUAL <r>   ROOTS <total>
+// Out:  PRECISION/ARG/POLICY (the config), SOLVE_MS, SETUP_MS/WINDING_MS/
+//       TRIAGE_MS/NEWTON_MS (phase breakdown), THROUGHPUT, MAXRESIDUAL, ROOTS.
+//
+// Flags -- three orthogonal axes, all resolved at COMPILE time so the winding
+// hot loop stays inlined (see launch_winding):
+//   --float | --double            winding arithmetic precision  (default double)
+//   --arg atan2|approx|quadrant   how the argument is computed   (default atan2)
+//   --policy naive|gather|scatter how sub-grid edges are shared  (default naive)
+//
+// MEASURED (T4, N=10000, degree 10) -- ship --float --policy gather:
+//   * --arg makes NO measurable difference: the winding is bound by the Horner
+//     evaluation, not the transcendental. All three give identical roots.
+//   * --policy DOES: gather 6.7x vs numpy, scatter 6.0x, naive 5.4x. gather beats
+//     scatter because scatter's shared-memory atomics contend.
+//   * --float is the big one: ~5x over --double (fp64 is 1/32 rate on a T4).
 //
 // Kaggle:
 //   %%writefile polyroots.cuh     (paste cuda/polyroots.cuh)
 //   %%writefile batched_solve.cu  (paste this)
-//   !nvcc -O2 -arch=sm_75 batched_solve.cu -o batched
+//   !nvcc -O2 -std=c++17 -arch=sm_75 batched_solve.cu -o batched   (C++17 needed
+//                                    for the `if constexpr` dispatch)
 // ===========================================================================
 #include "polyroots.cuh"
 #include <vector>
@@ -94,6 +109,17 @@ __device__ inline thrust::complex<T> perim_T(T cx, T cy, T half, int sps, int i)
 template<class T> struct LibAtan2 {
     __device__ T operator()(thrust::complex<T> w) const { return thrust::arg(w); }
 };
+// atan(r) for |r|<=1, standard cheap fit: max error ~1e-3 rad for ~4 multiplies
+// (vs the library's full-precision argument reduction + high-degree polynomial).
+//
+// Why such a sloppy approximation is safe here: the winding sums DIFFERENCES of
+// angles around a CLOSED loop. Writing the approximation error as e(theta) (it
+// depends only on the angle, since atan2 is scale-invariant), each step
+// contributes (e_{k+1} - e_k), and summing around the loop TELESCOPES to
+// e_last - e_first = 0 -- the loop returns to its starting point, so the errors
+// cancel exactly. The approximation therefore does not perturb the winding at
+// all; it only has to be accurate enough never to flip an unwrap decision (push
+// a step past +-pi), and ~1e-3 rad is orders of magnitude inside that margin.
 template<class T> __device__ inline T approx_atan_unit(T r) {   // atan(r), |r|<=1
     const T PI = T(3.14159265358979323846);
     T ar = r < 0 ? -r : r;
@@ -128,7 +154,19 @@ __device__ int wind_angle(const cmplx* coeff, int nc, T cx, T cy, T half, int sp
     double w = (double)tot / (2 * 3.14159265358979323846);
     return (int)(w >= 0 ? w + 0.5 : w - 0.5);
 }
-// Winding via QUADRANT counting — sign transitions, cross-product tiebreak on d==2.
+// Winding via QUADRANT counting -- no transcendental at all.
+// Instead of measuring the angle, just track which quadrant P(z) is in. Each
+// quadrant crossing is a quarter turn (pi/2), so a full revolution = 4 signed
+// crossings, and winding = (net crossings)/4 -- an exact integer, no rounding
+// of a float sum. Per step, d = (q_new - q_old) mod 4 gives:
+//   d=0 -> stayed put   d=1 -> +1 quarter (CCW)   d=3 -> -1 quarter (CW)
+//   d=2 -> AMBIGUOUS: a half turn is +2 or -2 quarters and the quadrant index
+//          alone cannot distinguish them. Resolve with the 2D cross product
+//          cr = re(a)*im(b) - im(a)*re(b) = |a||b|sin(phi): its SIGN is the sign
+//          of the rotation angle, so cr >= 0 means CCW (+2), else CW (-2).
+// (Sampling is dense enough that |d|>2 -- more than a half turn in one step --
+// does not occur; that would be undersampling, the same failure mode the angle
+// methods have at the +-pi unwrap boundary.)
 template<class T> __device__ inline int quadrant_of(thrust::complex<T> w) {
     if (w.real() >= 0) return (w.imag() >= 0) ? 0 : 3;
     return (w.imag() >= 0) ? 1 : 2;
@@ -215,16 +253,39 @@ __device__ T edge_phase(const cmplx* C, int nc, T ax, T ay, T bx, T by, int sps)
         return tot;
     }
 }
-// Turn an accumulated subcell sum into an integer root count.
+// Turn an accumulated subcell sum into an integer root count. The divisor is
+// "one full revolution" in that method's units: 2*pi radians for the angle
+// methods, 4 quarter-turn crossings for quadrant counting.
 template<class T, int METHOD>
 __device__ inline int edge_finalize(T s) {
     double v = (METHOD == 2) ? (double)s / 4.0 : (double)s / (2 * 3.14159265358979323846);
     return (int)(v >= 0 ? v + 0.5 : v - 0.5);
 }
 
-// grid line coordinate helpers (K+1 lines per axis)
+// grid line coordinate helpers: the KxK sub-grid is cut by K+1 lines per axis,
+// so corner (i,j) = (gridX(i), gridY(j)) for i,j in [0,K].
 template<class T> __device__ inline T gridX(const BatchCell& tk, T h, int i) { return T(tk.cx) - T(tk.half) + i * 2 * h; }
 template<class T> __device__ inline T gridY(const BatchCell& tk, T h, int j) { return T(tk.cy) - T(tk.half) + j * 2 * h; }
+
+// --- the edge-sharing identity (why gather/scatter work) --------------------
+// Every edge is stored ONCE in a canonical direction: horizontal L->R, vertical
+// B->T. Subcell (i,j) spans corners (i,j)..(i+1,j+1); walking its boundary
+// COUNTER-CLOCKWISE visits:
+//
+//        (i,j+1)  <--- H(i,j+1) ---  (i+1,j+1)      bottom = H(i,j)      (+, L->R = canonical)
+//           |                             ^         right  = V(i+1,j)    (+, B->T = canonical)
+//        V(i,j)                      V(i+1,j)       top    = H(i,j+1)    (-, walked R->L)
+//           v                             |         left   = V(i,j)      (-, walked T->B)
+//        (i,j)    ---  H(i,j)   --->  (i+1,j)
+//
+// Reversing a path negates its accumulated phase, hence the two minus signs:
+//
+//     winding(i,j) = H(i,j) + V(i+1,j) - H(i,j+1) - V(i,j)
+//
+// Each interior edge is shared by two neighbours with OPPOSITE signs, so it
+// cancels exactly -- which is both why one evaluation suffices (1.7x fewer
+// Horner evals: 144 edges vs naive's 256) and why the shared boundary is more
+// numerically consistent than naive's two independent recomputations.
 
 // --- GATHER: shared canonical edge tables, each subcell reads its 4 edges ---
 template<class T, int METHOD>
@@ -348,8 +409,25 @@ int main(int argc, char** argv) {
         for (int k = 0; k < nc; ++k) h_coeffs[(size_t)p*nc + k] = desc[nc-1-k];
     }
 
+    // Samples per edge, scaled with degree so the winding doesn't undersample
+    // densely-packed roots (mirrors the CPU's ~4*degree adaptive count).
     const int    sps       = std::max(48, 4 * deg);
-    const double isoThresh = std::min(0.5, 1.0 / deg), minHalf = 1e-6;
+    // isoThresh / minHalf are computed PER POLYNOMIAL after setup (they scale
+    // with that polynomial's root bound R) -- see the isoT/minH arrays below.
+    //
+    // isoThresh: isolate a count==1 cell only once it is small enough that its
+    // CENTER is a reliable Newton seed. From a too-large cell Newton escapes
+    // across the fractal basin boundary to a NEIGHBOURING root, the inside-check
+    // then rejects it, and the root is lost entirely. Roots inside a bound R
+    // are spaced ~R/n, and the seed error is the cell half-diagonal, so the
+    // criterion must be half << R/n -- hence isoThresh = R/deg.
+    //
+    // The R matters: an absolute `min(0.5, 1.0/deg)` has the right 1/n scaling
+    // but DROPS the length unit, silently assuming R ~ 1. It compares a length
+    // to a dimensionless number. Roots of unity (R ~ 2) happen to sit where
+    // that is accidentally correct; scale the same roots down by 10x and the
+    // solver isolates a level too early and loses roots. Measured on host:
+    // absolute -> 8/10 roots at scale <= 0.1; relative -> 10/10 over 1e-9..1e+9.
     const int    maxLevel  = 60;
     // Frontier peaks around N*deg (each poly ~deg active cells); 4x is safe
     // headroom. d_counts = maxTasks*64 ints dominates memory, so this bounds N.
@@ -375,6 +453,14 @@ int main(int argc, char** argv) {
     CK(cudaGetLastError()); CK(cudaDeviceSynchronize());
     std::vector<BatchCell> frontier(N);
     CK(cudaMemcpy(frontier.data(), d_front, (size_t)N * sizeof(BatchCell), cudaMemcpyDeviceToHost));
+    // Per-polynomial thresholds. Every threshold that is COMPARED AGAINST A
+    // LENGTH must itself scale with that polynomial's root bound R, or the
+    // solver stops being scale-invariant (see the isoThresh note above). R
+    // differs per polynomial here, so these are arrays, not scalars.
+    std::vector<double> h_bounds(N);
+    CK(cudaMemcpy(h_bounds.data(), d_bounds, (size_t)N * sizeof(double), cudaMemcpyDeviceToHost));
+    std::vector<double> isoT(N), minH(N);
+    for (int p = 0; p < N; ++p) { isoT[p] = h_bounds[p] / deg; minH[p] = h_bounds[p] * 1e-7; }
     t_setup = ms_since(s0);
 
     // --- batched BFS over the shared (poly,cell) work-list ---
@@ -403,9 +489,9 @@ int main(int argc, char** argv) {
                 int q = counts[b * NSUB + t]; if (q <= 0) continue;
                 int i = t % K, j = t / K;
                 BatchCell sub{ tk.poly, tk.cx - tk.half + (2*i+1)*h, tk.cy - tk.half + (2*j+1)*h, h };
-                if      (q == 1 && sub.half <= isoThresh) isolated.push_back(sub);
-                else if (sub.half <= minHalf)             { /* cluster: dropped in v1 */ }
-                else                                      next.push_back(sub);
+                if      (q == 1 && sub.half <= isoT[tk.poly]) isolated.push_back(sub);
+                else if (sub.half <= minH[tk.poly])          { /* cluster: dropped in v1 */ }
+                else                                         next.push_back(sub);
             }
         }
         frontier.swap(next);
@@ -435,7 +521,11 @@ int main(int argc, char** argv) {
         CK(cudaFree(d_out)); CK(cudaFree(d_ok)); CK(cudaFree(d_poly));
         for (int i = 0; i < m; ++i) {
             if (!ok[i]) continue; int p = poly[i]; bool dup = false;
-            for (auto& r : roots[p]) if (thrust::abs(r - out[i]) < 1e-6) { dup = true; break; }
+            // Dedup tolerance must ALSO scale with R: an absolute 1e-6 merges
+            // every distinct root of a small-scale polynomial into one (at
+            // scale 1e-9 all ten roots are within 1e-6 of each other -> 1 root).
+            const double dupTol = h_bounds[p] * 1e-7;
+            for (auto& r : roots[p]) if (thrust::abs(r - out[i]) < dupTol) { dup = true; break; }
             if (!dup) roots[p].push_back(out[i]);
         }
     }
