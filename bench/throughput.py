@@ -73,8 +73,10 @@ def main():
               f"   (max residual {g['MAXRESIDUAL']:.1e})  {g['THROUGHPUT']/np_tput:.1f}x vs numpy")
         if "ROOTS" in g:
             exp = a.N * a.degree
-            note = "" if g["ROOTS"] == exp else "   <-- INCOMPLETE (lost roots!)"
-            print(f"      roots found: {int(g['ROOTS'])}/{exp} ({100*g['ROOTS']/exp:.1f}%){note}")
+            miss = exp - int(g["ROOTS"])
+            note = "" if miss == 0 else f"   <-- INCOMPLETE ({miss} lost)"
+            # 4 decimals: at N=10000 a 0.03% loss must not round to a clean 100.0%
+            print(f"      roots found: {int(g['ROOTS'])}/{exp} ({100*g['ROOTS']/exp:.4f}%){note}")
             if g["ROOTS"] < exp and err.strip():                  # surface the binary's stderr
                 print(f"      stderr: {err.strip()[:300]}")
         if "WINDING_MS" in g:

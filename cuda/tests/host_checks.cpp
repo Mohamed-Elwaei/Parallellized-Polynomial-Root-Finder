@@ -17,6 +17,17 @@
 //      naive's. This is where the edge ORIENTATION SIGNS get validated; a sign
 //      error here is invisible until it silently miscounts on hardware.
 //
+// SCOPE -- READ THIS BEFORE TRUSTING A PASS:
+//   These checks run in DOUBLE. They validate the algorithm (thresholds,
+//   orientation, argument methods), NOT the shipped `--float` winding path.
+//   In particular check 1 passes at scale 1e9, but --float would OVERFLOW
+//   there: what must fit in float is |P(z)| on the contour ~ sum |c_k|*R^k,
+//   capping the usable root magnitude at ~2.3e3 for degree 10, ~27 for degree
+//   20, and ~0.78 (below the unit circle!) for degree 100 -- float max is
+//   3.4e38. batched_solve warns at run time when a batch exceeds that; see
+//   cuda/README.md. A green run here does NOT mean --float is safe at extreme
+//   scales or high degree.
+//
 // Build & run (exits non-zero on any failure):
 //     g++ -O2 -std=c++17 cuda/tests/host_checks.cpp -o host_checks && ./host_checks
 // ===========================================================================

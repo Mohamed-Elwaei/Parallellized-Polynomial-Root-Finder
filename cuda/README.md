@@ -114,6 +114,26 @@ Three findings worth keeping:
 1. **`--float` is the big win (~5x).** fp64 runs at 1/32 rate on a T4, and the
    winding only has to *count* roots — Newton still polishes in double, so the
    final accuracy is unchanged (max residual 7.2e-15 in every config).
+
+   ⚠️ **`--float` has a hard, degree-dependent range limit.** What must fit in
+   float is not the coefficients but `|P(z)|` **on the contour**, which grows
+   like `Σ|c_k|·R^k`. For well-spread roots of magnitude `s` the contour corner
+   sits near `3.1·s`, so the binding condition is `(3.1·s)^deg < 3.4e38` and the
+   usable root magnitude collapses as degree rises:
+
+   | degree | max root magnitude under `--float` |
+   |-------:|-----------------------------------:|
+   |      5 | ~1.6e7 |
+   |     10 | ~2.3e3 |
+   |     20 | ~27 |
+   |     50 | ~1.9 |
+   |    100 | **~0.78** — below the unit circle! |
+
+   At degree 100 `--float` cannot even handle roots of unity. Beyond the limit
+   the cast yields `inf`, the winding counts are garbage, and nothing else in
+   the pipeline would tell you — so `batched_solve` computes this bound up
+   front and warns on stderr. Use `--double` for high degree or large-magnitude
+   roots; it is not a practical constraint there (~1e30 even at degree 10).
 2. **`--arg` makes no measurable difference.** Replacing `atan2` with a cheap
    polynomial, or removing the transcendental entirely (`quadrant`), leaves the
    time unchanged: the winding is bound by the **Horner evaluation**, not the

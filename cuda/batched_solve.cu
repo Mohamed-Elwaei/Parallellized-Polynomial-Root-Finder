@@ -466,6 +466,31 @@ int main(int argc, char** argv) {
     // Newton reliably. R/(K*deg) forces one level deeper: completeness 96% ->
     // 100% on a 300-polynomial host batch, at ~2.4x the cells.
     for (int p = 0; p < N; ++p) { isoT[p] = h_bounds[p] / (K * deg); minH[p] = h_bounds[p] * 1e-7; }
+
+    // --- --float representability guard ------------------------------------
+    // Coefficients are STORED in double but cast to float for the winding when
+    // --float is selected. What must fit is not the coefficients but |P(z)| on
+    // the contour, which grows like sum |c_k| * R^k -- so the usable root
+    // magnitude shrinks fast with degree (deg 10 -> ~7e3, deg 20 -> ~84,
+    // deg 50 -> ~6). Past that the cast yields inf, the winding is garbage, and
+    // NOTHING else in the pipeline would tell you. Warn loudly instead.
+    if (useFloat) {
+        const double kFloatMax = 3.4028235e38;
+        int bad = 0; double worst = 0;
+        for (int p = 0; p < N; ++p) {
+            const cmplx* C = &h_coeffs[(size_t)p * nc];
+            double Rc = h_bounds[p] * 1.56;          // ~farthest contour corner
+            double mag = 0, pw = 1.0;
+            for (int k = 0; k < nc; ++k) { mag += thrust::abs(C[k]) * pw; pw *= Rc; }
+            if (mag > kFloatMax) ++bad;
+            if (mag > worst) worst = mag;
+        }
+        if (bad)
+            std::fprintf(stderr,
+                "warning: --float cannot represent %d/%d polynomial(s): |P| on the "
+                "contour reaches %.3g, above float's max %.3g. Winding counts will be "
+                "garbage for those. Rerun with --double.\n", bad, N, worst, kFloatMax);
+    }
     t_setup = ms_since(s0);
 
     // --- batched BFS over the shared (poly,cell) work-list ---
