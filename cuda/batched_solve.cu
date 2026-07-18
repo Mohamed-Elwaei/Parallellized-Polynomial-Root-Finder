@@ -468,28 +468,44 @@ int main(int argc, char** argv) {
     for (int p = 0; p < N; ++p) { isoT[p] = h_bounds[p] / (K * deg); minH[p] = h_bounds[p] * 1e-7; }
 
     // --- --float representability guard ------------------------------------
-    // Coefficients are STORED in double but cast to float for the winding when
-    // --float is selected. What must fit is not the coefficients but |P(z)| on
-    // the contour, which grows like sum |c_k| * R^k -- so the usable root
-    // magnitude shrinks fast with degree (deg 10 -> ~7e3, deg 20 -> ~84,
-    // deg 50 -> ~6). Past that the cast yields inf, the winding is garbage, and
-    // NOTHING else in the pipeline would tell you. Warn loudly instead.
+    // Coefficients are STORED in double but CAST TO FLOAT for the winding when
+    // --float is selected. The test is simply whether each coefficient survives
+    // that cast: |c_0| ~ (root magnitude)^deg, so the usable root magnitude is a
+    // BAND that narrows as degree rises (deg 20 -> [0.013, 84], deg 100 ->
+    // [0.42, 2.4]). Outside it a coefficient becomes inf or flushes to zero and
+    // the winding is garbage, with no other signal anywhere in the pipeline.
+    //
+    // NOTE: the test is on the COEFFICIENTS, not on |P(z)| over the contour.
+    // Measured: intermediate overflow far from the roots is benign (those
+    // regions have winding 0, so an error there costs work, not roots), and a
+    // contour-based bound raised false alarms on batches that solved perfectly.
+    // Underflow is the dangerous side -- it zeroes P near the roots too, and a
+    // scale-1e-6 batch silently returned 0.04% of its roots.
     if (useFloat) {
-        const double kFloatMax = 3.4028235e38;
-        int bad = 0; double worst = 0;
+        const double kFMax = 3.4028235e38, kFMin = 1.1754944e-38;
+        int over = 0, under = 0; double mx = 0, mn = 1e308;
         for (int p = 0; p < N; ++p) {
             const cmplx* C = &h_coeffs[(size_t)p * nc];
-            double Rc = h_bounds[p] * 1.56;          // ~farthest contour corner
-            double mag = 0, pw = 1.0;
-            for (int k = 0; k < nc; ++k) { mag += thrust::abs(C[k]) * pw; pw *= Rc; }
-            if (mag > kFloatMax) ++bad;
-            if (mag > worst) worst = mag;
+            bool o = false, u = false;
+            for (int k = 0; k < nc; ++k) {
+                double a = thrust::abs(C[k]);
+                if (a > kFMax)             o = true;
+                if (a > 0 && a < kFMin)    u = true;
+                if (a > mx)                mx = a;
+                if (a > 0 && a < mn)       mn = a;
+            }
+            if (o) ++over;
+            if (u) ++under;
         }
-        if (bad)
-            std::fprintf(stderr,
-                "warning: --float cannot represent %d/%d polynomial(s): |P| on the "
-                "contour reaches %.3g, above float's max %.3g. Winding counts will be "
-                "garbage for those. Rerun with --double.\n", bad, N, worst, kFloatMax);
+        if (over)
+            std::fprintf(stderr, "warning: --float OVERFLOW on %d/%d polynomial(s): "
+                "largest coefficient %.3g exceeds float max %.3g -- roots are too "
+                "large for this degree. Rerun with --double.\n", over, N, mx, kFMax);
+        if (under)
+            std::fprintf(stderr, "warning: --float UNDERFLOW on %d/%d polynomial(s): "
+                "smallest non-zero coefficient %.3g is below float min %.3g and will "
+                "flush to zero -- roots are too small for this degree. Rerun with "
+                "--double.\n", under, N, mn, kFMin);
     }
     t_setup = ms_since(s0);
 

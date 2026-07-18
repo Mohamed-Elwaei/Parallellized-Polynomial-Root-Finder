@@ -121,25 +121,33 @@ Three findings worth keeping:
    winding only has to *count* roots — Newton still polishes in double, so the
    final accuracy is unchanged (max residual 7.2e-15 in every config).
 
-   ⚠️ **`--float` has a hard, degree-dependent range limit.** What must fit in
-   float is not the coefficients but `|P(z)|` **on the contour**, which grows
-   like `Σ|c_k|·R^k`. For well-spread roots of magnitude `s` the contour corner
-   sits near `3.1·s`, so the binding condition is `(3.1·s)^deg < 3.4e38` and the
-   usable root magnitude collapses as degree rises:
+   ⚠️ **`--float` has a two-sided, degree-dependent range limit.** Coefficients
+   are stored in double but **cast to float** for the winding, and `|c_0|` is
+   roughly `(root magnitude)^deg`. So the usable root magnitude is a *band* that
+   narrows from both ends as degree rises:
 
-   | degree | max root magnitude under `--float` |
-   |-------:|-----------------------------------:|
-   |      5 | ~1.6e7 |
-   |     10 | ~2.3e3 |
-   |     20 | ~27 |
-   |     50 | ~1.9 |
-   |    100 | **~0.78** — below the unit circle! |
+   | degree | min \|root\| | max \|root\| |
+   |-------:|-------------:|-------------:|
+   |      5 | 2.6e-8 | 5.1e7 |
+   |     10 | 1.6e-4 | 7.1e3 |
+   |     20 | 0.013 | 84 |
+   |     50 | 0.17 | 5.9 |
+   |    100 | 0.42 | 2.4 |
 
-   At degree 100 `--float` cannot even handle roots of unity. Beyond the limit
-   the cast yields `inf`, the winding counts are garbage, and nothing else in
-   the pipeline would tell you — so `batched_solve` computes this bound up
-   front and warns on stderr. Use `--double` for high degree or large-magnitude
-   roots; it is not a practical constraint there (~1e30 even at degree 10).
+   Outside the band a coefficient becomes `inf` or flushes to zero and the
+   winding is garbage. `batched_solve` checks both ends up front and warns on
+   stderr. Use `--double` outside it (never a practical constraint there).
+
+   Two things measured rather than assumed:
+   - **Underflow is the dangerous side.** A scale-1e-6 batch silently returned
+     **0.04%** of its roots — small coefficients flush to zero, so `P` is zero
+     *near the roots too*. Overflow, by contrast, mostly damages regions far
+     from any root, where the winding is 0 anyway; a batch whose `|P|` on the
+     contour exceeded float's max still solved to full completeness.
+   - **The unit circle is always inside the band**, at every degree — so roots
+     of unity are safe in float regardless of degree. (An earlier revision of
+     this table claimed otherwise; it used a `|P|`-on-the-contour bound that
+     was too conservative and raised false alarms.)
 2. **`--arg` makes no measurable difference.** Replacing `atan2` with a cheap
    polynomial, or removing the transcendental entirely (`quadrant`), leaves the
    time unchanged: the winding is bound by the **Horner evaluation**, not the

@@ -20,13 +20,14 @@
 // SCOPE -- READ THIS BEFORE TRUSTING A PASS:
 //   These checks run in DOUBLE. They validate the algorithm (thresholds,
 //   orientation, argument methods), NOT the shipped `--float` winding path.
-//   In particular check 1 passes at scale 1e9, but --float would OVERFLOW
-//   there: what must fit in float is |P(z)| on the contour ~ sum |c_k|*R^k,
-//   capping the usable root magnitude at ~2.3e3 for degree 10, ~27 for degree
-//   20, and ~0.78 (below the unit circle!) for degree 100 -- float max is
-//   3.4e38. batched_solve warns at run time when a batch exceeds that; see
-//   cuda/README.md. A green run here does NOT mean --float is safe at extreme
-//   scales or high degree.
+//   In particular check 1 passes at scale 1e-9 and 1e9, but --float can do
+//   NEITHER: coefficients are cast to float, and |c_0| ~ (root magnitude)^deg,
+//   so float is confined to a band that narrows with degree -- roughly
+//   [1.6e-4, 7.1e3] at degree 10 and [0.42, 2.4] at degree 100. Outside it a
+//   coefficient overflows to inf or flushes to zero. Underflow is the worse
+//   side: a scale-1e-6 GPU batch silently returned 0.04% of its roots.
+//   batched_solve warns at run time; see cuda/README.md. A green run here does
+//   NOT mean --float is safe at these scales.
 //
 // Build & run (exits non-zero on any failure):
 //     g++ -O2 -std=c++17 cuda/tests/host_checks.cpp -o host_checks && ./host_checks

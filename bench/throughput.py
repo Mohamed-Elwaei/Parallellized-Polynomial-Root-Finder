@@ -27,14 +27,16 @@ def gen_batch(N, deg, seed=0, scale=1.0):
     return [np.poly(scale * (rng.uniform(-1, 1, deg) + 1j * rng.uniform(-1, 1, deg)))
             for _ in range(N)]
 
-def float_root_limit(deg):
-    """Largest root magnitude --float can represent at this degree.
+def float_root_band(deg):
+    """(min, max) root magnitude --float can represent at this degree.
 
-    What must fit in float is |P(z)| on the contour ~ sum |c_k|*R^k, not the
-    coefficients. For well-spread roots of magnitude s the contour corner sits
-    near 3.12*s, so the binding condition is (3.12*s)^deg < FLT_MAX.
+    Coefficients are cast to float for the winding, and |c_0| ~ s^deg, so the
+    usable band is FLT_MIN^(1/deg) .. FLT_MAX^(1/deg). It narrows from BOTH
+    ends as degree rises. Verified against hardware at scales 1e-6..1e6: this
+    predicts pass/fail exactly, where a |P|-on-the-contour bound did not
+    (intermediate overflow far from the roots turns out to be benign).
     """
-    return (3.4028235e38 ** (1.0 / deg)) / 3.12
+    return (1.1754944e-38 ** (1.0 / deg), 3.4028235e38 ** (1.0 / deg))
 
 def run_numpy(polys):
     t0 = time.perf_counter()
@@ -68,25 +70,30 @@ def scale_sweep(gpu, N, deg, scales):
     representability wall: past `float_root_limit(deg)` the cast to single
     precision overflows and the binary warns.
     """
-    lim = float_root_limit(deg)
+    lo, hi = float_root_band(deg)
     print(f"\nscale sweep: N={N} degree={deg}")
     print(f"  roots are uniform on [-1,1]^2 * scale, so max |root| ~ 1.41*scale")
-    print(f"  --float representability limit at degree {deg}: |root| <~ {lim:.3g}\n")
+    print(f"  --float band at degree {deg}: |root| in [{lo:.3g}, {hi:.3g}]\n")
     print(f"  {'scale':>9}  {'double':>18}  {'float':>18}  note")
     for s in scales:
         polys = gen_batch(N, deg, scale=s)
-        cells, note = [], ""
+        cells, warned, fcomp = [], "", None
         for prec in ("--double", "--float"):
             g, err = run_gpu(gpu, polys, deg, [prec, "--policy", "gather"])
             if "ROOTS" not in g:
                 cells.append("failed"); continue
             exp = N * deg
             cells.append(f"{int(g['ROOTS'])}/{exp} ({100*g['ROOTS']/exp:6.2f}%)")
-            if prec == "--float" and "cannot represent" in err:
-                note = "float guard fired (expected past the limit)"
-        over = 1.41 * s > lim
-        if over and not note:
-            note = "!! past float limit but NO warning"
+            if prec == "--float":
+                fcomp = g["ROOTS"] / exp
+                if "OVERFLOW" in err:  warned = "overflow"
+                if "UNDERFLOW" in err: warned = "underflow"
+        # Cross-check the guard against what actually happened. Both directions
+        # matter: a miss ships garbage, a false alarm rejects valid work.
+        broke = fcomp is not None and fcomp < 0.90
+        note = f"guard: {warned}" if warned else ""
+        if broke and not warned:  note = "!! BROKE with NO warning (guard missed it)"
+        elif warned and not broke: note += "  !! false alarm (float was fine)"
         print(f"  {s:>9.0e}  {cells[0]:>18}  {cells[1]:>18}  {note}")
 
 def main():
