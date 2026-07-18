@@ -511,51 +511,63 @@ int main(int argc, char** argv) {
 
     // --- batched BFS over the shared (poly,cell) work-list ---
     std::vector<BatchCell> isolated;
+    size_t peakFrontier = 0;
     for (int lv = 0; lv < maxLevel && !frontier.empty(); ++lv) {
-        size_t n = frontier.size();
-        if (n > maxTasks) { std::fprintf(stderr, "task cap hit\n"); break; }
-        auto g0 = clk::now();
-        CK(cudaMemcpy(d_front, frontier.data(), n * sizeof(BatchCell), cudaMemcpyHostToDevice));
-        // dispatch {float,double} x {atan2,approx,quadrant} at compile time;
-        // launch_winding then picks the policy kernel (naive|gather|scatter).
-        #define LAUNCH(T,M) launch_winding<T,M>(policy, n, d_front, d_coeffs, nc, sps, d_counts)
-        if (useFloat) { if (argMethod==2) LAUNCH(float,2);  else if (argMethod==1) LAUNCH(float,1);  else LAUNCH(float,0); }
-        else          { if (argMethod==2) LAUNCH(double,2); else if (argMethod==1) LAUNCH(double,1); else LAUNCH(double,0); }
-        #undef LAUNCH
-        CK(cudaGetLastError()); CK(cudaDeviceSynchronize());
-        std::vector<int> counts(n * NSUB);
-        CK(cudaMemcpy(counts.data(), d_counts, n * NSUB * sizeof(int), cudaMemcpyDeviceToHost));
-        t_wind += ms_since(g0);                        // GPU winding + transfers
-
-        auto h0 = clk::now();
+        peakFrontier = std::max(peakFrontier, frontier.size());
         std::vector<BatchCell> next;
-        for (size_t b = 0; b < n; ++b) {
-            const BatchCell& tk = frontier[b]; double h = tk.half / K;
-            for (int t = 0; t < NSUB; ++t) {
-                int q = counts[b * NSUB + t]; if (q <= 0) continue;
-                int i = t % K, j = t / K;
-                BatchCell sub{ tk.poly, tk.cx - tk.half + (2*i+1)*h, tk.cy - tk.half + (2*j+1)*h, h };
-                if      (q == 1 && sub.half <= isoT[tk.poly]) isolated.push_back(sub);
-                else if (sub.half <= minH[tk.poly])          { /* cluster: dropped in v1 */ }
-                else                                         next.push_back(sub);
+        // maxTasks is the size of the DEVICE BUFFERS, not a correctness limit.
+        // A frontier larger than that is processed in CHUNKS -- it used to
+        // `break` out of the BFS, abandoning the whole frontier and everything
+        // below it, which silently lost roots (degree 20 float: 99.70% vs
+        // double's 99.84%; degree 50: 80% vs 90%).
+        for (size_t off = 0; off < frontier.size(); off += maxTasks) {
+            size_t n = std::min(maxTasks, frontier.size() - off);
+            auto g0 = clk::now();
+            CK(cudaMemcpy(d_front, frontier.data() + off, n * sizeof(BatchCell), cudaMemcpyHostToDevice));
+            // dispatch {float,double} x {atan2,approx,quadrant} at compile time;
+            // launch_winding then picks the policy kernel (naive|gather|scatter).
+            #define LAUNCH(T,M) launch_winding<T,M>(policy, n, d_front, d_coeffs, nc, sps, d_counts)
+            if (useFloat) { if (argMethod==2) LAUNCH(float,2);  else if (argMethod==1) LAUNCH(float,1);  else LAUNCH(float,0); }
+            else          { if (argMethod==2) LAUNCH(double,2); else if (argMethod==1) LAUNCH(double,1); else LAUNCH(double,0); }
+            #undef LAUNCH
+            CK(cudaGetLastError()); CK(cudaDeviceSynchronize());
+            std::vector<int> counts(n * NSUB);
+            CK(cudaMemcpy(counts.data(), d_counts, n * NSUB * sizeof(int), cudaMemcpyDeviceToHost));
+            t_wind += ms_since(g0);                    // GPU winding + transfers
+
+            auto h0 = clk::now();
+            for (size_t b = 0; b < n; ++b) {
+                const BatchCell& tk = frontier[off + b]; double h = tk.half / K;
+                for (int t = 0; t < NSUB; ++t) {
+                    int q = counts[b * NSUB + t]; if (q <= 0) continue;
+                    int i = t % K, j = t / K;
+                    BatchCell sub{ tk.poly, tk.cx - tk.half + (2*i+1)*h, tk.cy - tk.half + (2*j+1)*h, h };
+                    if      (q == 1 && sub.half <= isoT[tk.poly]) isolated.push_back(sub);
+                    else if (sub.half <= minH[tk.poly])          { /* cluster: dropped in v1 */ }
+                    else                                         next.push_back(sub);
+                }
             }
+            t_triage += ms_since(h0);                  // host-side triage
         }
         frontier.swap(next);
-        t_triage += ms_since(h0);                      // host-side triage (the suspect)
     }
+    // Diagnostic: the argument principle bounds the live cells per polynomial by
+    // its degree, so a frontier much above N*deg means the winding is producing
+    // SPURIOUS positive counts (float is noisier here than double).
+    if (peakFrontier > (size_t)2 * N * deg)
+        std::fprintf(stderr, "note: peak frontier %zu is %.1fx the theoretical max "
+            "N*deg=%d -- winding is producing spurious counts\n",
+            peakFrontier, (double)peakFrontier / ((double)N * deg), N * deg);
 
     // --- batched Newton over all isolated cells ---
     auto nw0 = clk::now();
     std::vector<std::vector<cmplx>> roots(N);
-    if (isolated.size() > maxTasks) {                        // reuse d_front; guard its size
-        std::fprintf(stderr, "warning: %zu isolated > buffer %zu; truncating\n",
-                     isolated.size(), maxTasks);
-        isolated.resize(maxTasks);
-    }
-    if (!isolated.empty()) {
-        int m = (int)isolated.size();
+    // Chunked over the device buffer for the same reason as the BFS above:
+    // truncating the isolated list to fit would DROP ROOTS outright.
+    for (size_t ioff = 0; ioff < isolated.size(); ioff += maxTasks) {
+        int m = (int)std::min(maxTasks, isolated.size() - ioff);
         cmplx* d_out; int *d_ok, *d_poly;
-        CK(cudaMemcpy(d_front, isolated.data(), m * sizeof(BatchCell), cudaMemcpyHostToDevice));
+        CK(cudaMemcpy(d_front, isolated.data() + ioff, m * sizeof(BatchCell), cudaMemcpyHostToDevice));
         CK(cudaMalloc(&d_out, m * sizeof(cmplx))); CK(cudaMalloc(&d_ok, m * sizeof(int)));
         CK(cudaMalloc(&d_poly, m * sizeof(int)));
         batched_newton<<<nblocks(m, BLK), BLK>>>((BatchCell*)d_front, m, d_coeffs, d_deriv, nc, d_out, d_ok, d_poly);
