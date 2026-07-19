@@ -187,7 +187,38 @@ It pins three properties, each of which was expensive to discover:
    counts on all 64 subcells. This is where an edge orientation sign error
    would surface; on hardware it would just silently miscount.
 
+Plus check 5, **polynomial families** beyond the benchmark's single
+distribution — tight clusters, collinear real roots (which stress the
+axis-aligned grid), roots at the origin, and degenerate low degrees. All pass;
+clusters resolve down to 1e-6 separation.
+
 Exits non-zero on failure, so it can be wired into CI.
+
+### Known limitation: phantom roots at multiplicity >= 3
+
+A multiplicity-`m` root cannot be located to better than `~eps^(1/m)` — near it
+`P ~ (z-r)^m`, so rounding noise swamps the value and Newton converges only
+linearly. The polished points scatter *farther apart than the dedup tolerance*
+and survive as separate roots. Measured: `(z-1)^3 (z+2)` returns **6** distinct
+roots where 2 exist; `m=5` returns **11**. These are excess (phantom) roots, not
+lost ones. `m=2` is fine.
+
+**It is not fixable by tuning the dedup tolerance.** At `R*1e-5` the `m=3` case
+becomes correct, but a genuine 1e-6 cluster then collapses — a multiple root's
+scatter is *larger* than a resolvable cluster gap, so no distance threshold
+separates the two cases:
+
+| dedup tol | m=3 | m=5 | distinct pair @ 1e-6 |
+|-----------|----:|----:|---------------------:|
+| `R*1e-7` (current) | 6 ✗ | 11 ✗ | 4 ✓ |
+| `R*1e-5` | 2 ✓ | 3 ✗ | 3 ✗ |
+
+The fix has to use the winding **count** (which already knows the multiplicity)
+rather than distance: emit an unsplittable count-`q` cell as one root of
+multiplicity `q` with the cell as its error bound. `cuda/solve.cu` already does
+this via cluster enclosures; `batched_solve.cu` drops them instead
+(`/* cluster: dropped in v1 */`). Check 5 pins the current numbers so a fix
+shows up as a deliberate change.
 
 ## Status
 

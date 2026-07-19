@@ -312,12 +312,86 @@ static void check_batch_completeness() {
     report(found == (long)M*deg, buf);
 }
 
+// 5. Polynomial FAMILIES beyond "random roots in a square".
+//    Every benchmark number in this project comes from one distribution, which
+//    is the same blind spot that hid the scale bug. These exercise the shapes a
+//    real user actually hits: repeated roots, tight clusters, collinear real
+//    roots (which stress the axis-aligned grid), and degenerate low degrees.
+// Report-only: prints without failing. For behaviour that is a KNOWN, pinned
+// limitation, so that an improvement shows up as a deliberate change.
+static void pinned(const char* what, int got, int want) {
+    std::printf("       %-34s %2d / %2d %s\n", what, got, want,
+                got == want ? "" : (got > want ? "  <-- PHANTOM (excess)" : "  <-- LOSS"));
+}
+static void check_families() {
+    std::printf("5. polynomial families (distinct roots found)\n");
+
+    // (a) Repeated roots -- KNOWN LIMITATION, pinned not asserted.
+    //
+    //     A multiplicity-m root cannot be located to better than ~eps^(1/m)
+    //     (m=3 -> 6e-6, m=5 -> 7e-4): near it P ~ (z-r)^m, so rounding noise
+    //     swamps the value and Newton converges only linearly. The polished
+    //     points therefore scatter FARTHER apart than the dedup tolerance
+    //     (R*1e-7 ~ 4e-7) and survive as separate roots -- PHANTOMS. Measured:
+    //     (z-1)^3(z+2) returns 6 distinct roots where 2 exist; m=5 returns 11.
+    //
+    //     This is NOT fixable by loosening the dedup tolerance. At R*1e-5 the
+    //     m=3 case is correct, but the 1e-6 cluster below then collapses to 3
+    //     -- a multiple root's scatter is larger than a genuinely resolvable
+    //     cluster gap, so no distance threshold separates the two cases.
+    //
+    //     The real fix uses the winding COUNT (which already knows the
+    //     multiplicity) rather than distance: emit an unsplittable count-q cell
+    //     as one root of multiplicity q with the cell as its error bound. That
+    //     is what cuda/solve.cu does with its cluster enclosures; the batched
+    //     solver drops them instead ("cluster: dropped in v1").
+    std::printf("     multiplicity  (z-1)^m (z+2), expect 2 distinct"
+                "   [KNOWN LIMITATION -- pinned, not asserted]:\n");
+    for (int m : {2, 3, 5}) {
+        std::vector<cd> r(m, cd(1,0)); r.push_back(cd(-2,0));
+        char buf[64]; std::snprintf(buf, sizeof buf, "m = %d", m);
+        pinned(buf, solve_count(from_roots(r), 0), 2);
+    }
+    // (b) Tight clusters of DISTINCT roots -- these must work, and do, down to
+    //     1e-6 separation. (Asserted only to 1e-4: 1e-6 sits close enough to
+    //     the dedup tolerance that pinning it would make the suite brittle.)
+    std::printf("     cluster  {0.3, 0.3+d, -1, 2}, expect 4 distinct:\n");
+    for (double d : {1e-1, 1e-2, 1e-3, 1e-4}) {
+        std::vector<cd> r = { cd(0.3,0), cd(0.3+d,0), cd(-1,0), cd(2,0) };
+        char buf[64]; std::snprintf(buf, sizeof buf, "separation %.0e", d);
+        report(solve_count(from_roots(r), 0) == 4, buf);
+    }
+    {   // report-only: near the dedup tolerance
+        std::vector<cd> r = { cd(0.3,0), cd(0.3+1e-6,0), cd(-1,0), cd(2,0) };
+        pinned("separation 1e-06 (near dedup tol)", solve_count(from_roots(r), 0), 4);
+    }
+    // (c) collinear REAL roots. The subdivision grid is axis-aligned, so roots
+    //     on the real axis risk landing exactly on cell boundaries (the
+    //     "grazing" failure the initial-cell offset exists to avoid). Includes
+    //     a root at the origin, i.e. a zero constant coefficient.
+    std::printf("     real-axis roots (stresses the axis-aligned grid):\n");
+    {
+        std::vector<cd> r = { cd(-2,0), cd(-1,0), cd(0,0), cd(1,0), cd(2,0) };
+        report(solve_count(from_roots(r), 0) == 5, "5 evenly spaced, incl. origin");
+        std::vector<cd> r2;
+        for (int k = 0; k < 8; ++k) r2.push_back(cd(-3.5 + k, 0));
+        report(solve_count(from_roots(r2), 0) == 8, "8 evenly spaced");
+    }
+    // (d) degenerate low degrees.
+    std::printf("     degenerate:\n");
+    report(solve_count(from_roots({cd(3,0)}), 0) == 1, "degree 1  (z - 3)");
+    report(solve_count(from_roots({cd(1,0), cd(-1,0)}), 0) == 2, "degree 2  (z-1)(z+1)");
+    report(solve_count(from_roots({cd(1,1), cd(-2,0.5), cd(0.3,-1.4)}), 0) == 3,
+           "complex coeffs, degree 3");
+}
+
 int main() {
     std::printf("host regression checks for the CUDA leaf math\n\n");
     check_scale_invariance();  std::printf("\n");
     check_arg_methods();       std::printf("\n");
     check_edge_decomposition();std::printf("\n");
-    check_batch_completeness();
+    check_batch_completeness();std::printf("\n");
+    check_families();
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED",
                 failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
